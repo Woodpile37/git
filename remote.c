@@ -1,6 +1,7 @@
 #include "cache.h"
 #include "config.h"
 #include "remote.h"
+#include "urlmatch.h"
 #include "refs.h"
 #include "refspec.h"
 #include "object-store.h"
@@ -613,6 +614,39 @@ const char *remote_ref_for_branch(struct branch *branch, int for_push)
 	return NULL;
 }
 
+static void validate_remote_url(struct remote *remote)
+{
+	int i;
+	const char *value;
+	struct strbuf redacted = STRBUF_INIT;
+
+	if (git_config_get_string_tmp("fetch.credentialsinurl", &value) ||
+	    !strcmp("allow", value))
+		return;
+
+	for (i = 0; i < remote->url_nr; i++) {
+		struct url_info url_info = { NULL };
+		url_normalize(remote->url[i], &url_info);
+
+		if (!url_info.passwd_len)
+			goto loop_cleanup;
+
+		strbuf_add(&redacted, url_info.url, url_info.passwd_off);
+		strbuf_addstr(&redacted, "<redacted>");
+		strbuf_addstr(&redacted, url_info.url + url_info.passwd_off + url_info.passwd_len);
+
+		if (!strcmp("warn", value))
+			warning(_("URL '%s' uses plaintext credentials"), redacted.buf);
+		if (!strcmp("die", value))
+			die(_("URL '%s' uses plaintext credentials"), redacted.buf);
+
+loop_cleanup:
+		free(url_info.url);
+	}
+
+	strbuf_release(&redacted);
+}
+
 static struct remote *
 remotes_remote_get_1(struct remote_state *remote_state, const char *name,
 		     const char *(*get_default)(struct remote_state *,
@@ -638,6 +672,9 @@ remotes_remote_get_1(struct remote_state *remote_state, const char *name,
 		add_url_alias(remote_state, ret, name);
 	if (!valid_remote(ret))
 		return NULL;
+
+	validate_remote_url(ret);
+
 	return ret;
 }
 
