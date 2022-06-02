@@ -1821,6 +1821,10 @@ test_expect_success 'fetch warns or fails when using username:password' '
 
 	test_must_fail git -c fetch.credentialsInUrl=die fetch https://username:password@localhost 2>err &&
 	grep "fatal: $message" err >warnings &&
+	test_line_count = 1 warnings &&
+
+	test_must_fail git -c fetch.credentialsInUrl=die fetch https://username:@localhost 2>err &&
+	grep "fatal: $message" err >warnings &&
 	test_line_count = 1 warnings
 '
 

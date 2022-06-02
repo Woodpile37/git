@@ -619,25 +619,35 @@ static void validate_remote_url(struct remote *remote)
 	int i;
 	const char *value;
 	struct strbuf redacted = STRBUF_INIT;
+	int warn_not_die;
 
-	if (git_config_get_string_tmp("fetch.credentialsinurl", &value) ||
-	    !strcmp("allow", value))
+	if (git_config_get_string_tmp("fetch.credentialsinurl", &value))
 		return;
 
-	for (i = 0; i < remote->url_nr; i++) {
-		struct url_info url_info = { NULL };
-		url_normalize(remote->url[i], &url_info);
+	if (!strcmp("warn", value))
+		warn_not_die = 1;
+	else if (!strcmp("die", value))
+		warn_not_die = 0;
+	else if (!strcmp("allow", value))
+		return;
+	else
+		die(_("unrecognized value fetch.credentialsInURL: '%s'"), value);
 
-		if (!url_info.passwd_len)
+	for (i = 0; i < remote->url_nr; i++) {
+		struct url_info url_info = { 0 };
+
+		if (!url_normalize(remote->url[i], &url_info) ||
+		    !url_info.passwd_off)
 			goto loop_cleanup;
 
 		strbuf_add(&redacted, url_info.url, url_info.passwd_off);
 		strbuf_addstr(&redacted, "<redacted>");
-		strbuf_addstr(&redacted, url_info.url + url_info.passwd_off + url_info.passwd_len);
+		strbuf_addstr(&redacted,
+			      url_info.url + url_info.passwd_off + url_info.passwd_len);
 
-		if (!strcmp("warn", value))
+		if (warn_not_die)
 			warning(_("URL '%s' uses plaintext credentials"), redacted.buf);
-		if (!strcmp("die", value))
+		else
 			die(_("URL '%s' uses plaintext credentials"), redacted.buf);
 
 loop_cleanup:

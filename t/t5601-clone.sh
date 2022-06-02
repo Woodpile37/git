@@ -82,6 +82,10 @@ test_expect_success 'clone warns or fails when using username:password' '
 
 	test_must_fail git -c fetch.credentialsInUrl=die clone https://username:password@localhost attempt3 2>err &&
 	grep "fatal: $message" err >warnings &&
+	test_line_count = 1 warnings &&
+
+	test_must_fail git -c fetch.credentialsInUrl=die clone https://username:@localhost attempt3 2>err &&
+	grep "fatal: $message" err >warnings &&
 	test_line_count = 1 warnings
 '
 
