@@ -170,6 +170,15 @@ test_expect_success 'fetch --update-shallow into a repo with submodules' '
 	git -C repo-with-sub fetch --update-shallow ../shallow/.git refs/heads/*:refs/remotes/shallow/*
 '
 
+test_expect_success 'fetch --update-shallow a commit that is also a shallow point into a repo with submodules' '
+	git init repo-with-unreachable-upstream-shallow &&
+	git -C repo-with-unreachable-upstream-shallow submodule add ../a-submodule a-submodule &&
+	git -C repo-with-unreachable-upstream-shallow commit -m "added submodule" &&
+
+	SHALLOW=$(cat shallow/.git/shallow) &&
+	git -C repo-with-unreachable-upstream-shallow fetch --update-shallow ../shallow/.git "$SHALLOW":refs/heads/a-shallow
+'
+
 test_expect_success 'fetch --update-shallow (with fetch.writeCommitGraph)' '
 	(
 	cd shallow &&
