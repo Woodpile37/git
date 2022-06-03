@@ -1768,6 +1768,11 @@ test_expect_success '--update-refs adds git branch commands' '
 		exec git update-ref refs/heads/no-conflict-branch HEAD $(git rev-parse M)
 		EOF
 
+		test_cmp expect todo &&
+
+		test_must_fail git -c rebase.autosquash=true \
+				   -c rebase.updaterefs=true \
+				   rebase -i primary >todo &&
 		test_cmp expect todo
 	)
 '
