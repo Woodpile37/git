@@ -362,7 +362,6 @@ test_expect_success 'do not create empty note with -m ""' '
 '
 
 test_expect_success 'create note with combination of -m and -F' '
-	test_when_finished git notes remove HEAD &&
 	cat >expect-combine_m_and_F <<-EOF &&
 		foo
 
@@ -377,41 +376,6 @@ test_expect_success 'create note with combination of -m and -F' '
 	echo "xyzzy" >note_a &&
 	echo "zyxxy" >note_b &&
 	git notes add -m "foo" -F note_a -m "bar" -F note_b -m "baz" &&
-	git notes show >actual &&
-	test_cmp expect-combine_m_and_F actual
-'
-
-test_expect_success 'create note with combination of -m and -F and --separator' '
-	test_when_finished git notes remove HEAD &&
-	cat >expect-combine_m_and_F <<-\EOF &&
-	foo
-	-------
-	xyzzy
-	-------
-	bar
-	-------
-	zyxxy
-	-------
-	baz
-	EOF
-	echo "xyzzy" >note_a &&
-	echo "zyxxy" >note_b &&
-	git notes add -m "foo" -F note_a -m "bar" -F note_b -m "baz" --separator="-------" &&
-	git notes show >actual &&
-	test_cmp expect-combine_m_and_F actual
-'
-
-test_expect_success 'create note with combination of -m and -F and --no-separator' '
-	cat >expect-combine_m_and_F <<-\EOF &&
-	foo
-	xyzzy
-	bar
-	zyxxy
-	baz
-	EOF
-	echo "xyzzy" >note_a &&
-	echo "zyxxy" >note_b &&
-	git notes add -m "foo" -F note_a -m "bar" -F note_b -m "baz" --no-separator &&
 	git notes show >actual &&
 	test_cmp expect-combine_m_and_F actual
 '
@@ -557,110 +521,16 @@ test_expect_success 'listing non-existing notes fails' '
 	test_must_be_empty actual
 '
 
-test_expect_success 'append: specify a separator with an empty arg' '
+test_expect_success 'append to existing note without a beginning blank line' '
 	test_when_finished git notes remove HEAD &&
 	cat >expect <<-\EOF &&
-	notes-1
-
-	notes-2
+		Initial set of notes
+		Appended notes
 	EOF
-
-	git notes add -m "notes-1" &&
-	git notes append --separator="" -m "notes-2" &&
+	git notes add -m "Initial set of notes" &&
+	git notes append --no-blank-line -m "Appended notes" &&
 	git notes show >actual &&
 	test_cmp expect actual
-'
-
-test_expect_success 'append: specify a separator without arg' '
-	test_when_finished git notes remove HEAD &&
-	cat >expect <<-\EOF &&
-	notes-1
-
-	notes-2
-	EOF
-
-	git notes add -m "notes-1" &&
-	git notes append --separator -m "notes-2" &&
-	git notes show >actual &&
-	test_cmp expect actual
-'
-
-test_expect_success 'append: specify as --no-separator' '
-	test_when_finished git notes remove HEAD &&
-	cat >expect <<-\EOF &&
-	notes-1
-	notes-2
-	EOF
-
-	git notes add -m "notes-1" &&
-	git notes append --no-separator -m "notes-2" &&
-	git notes show >actual &&
-	test_cmp expect actual
-'
-
-test_expect_success 'append: specify separator with line break' '
-	test_when_finished git notes remove HEAD &&
-	cat >expect <<-\EOF &&
-	notes-1
-	-------
-	notes-2
-	EOF
-
-	git notes add -m "notes-1" &&
-	git notes append --separator="-------$LF" -m "notes-2" &&
-	git notes show >actual &&
-	test_cmp expect actual
-'
-
-test_expect_success 'append: specify separator without line break' '
-	test_when_finished git notes remove HEAD &&
-	cat >expect <<-\EOF &&
-	notes-1
-	-------
-	notes-2
-	EOF
-
-	git notes add -m "notes-1" &&
-	git notes append --separator="-------" -m "notes-2" &&
-	git notes show >actual &&
-	test_cmp expect actual
-'
-
-test_expect_success 'append: specify separator with multiple messages' '
-	test_when_finished git notes remove HEAD &&
-	cat >expect <<-\EOF &&
-	notes-1
-	-------
-	notes-2
-	-------
-	notes-3
-	EOF
-
-	git notes add -m "notes-1" &&
-	git notes append --separator="-------" -m "notes-2" -m "notes-3" &&
-	git notes show >actual &&
-	test_cmp expect actual
-'
-
-test_expect_success 'append note with combination of -m and -F and --separator' '
-	test_when_finished git notes remove HEAD &&
-	cat >expect-combine_m_and_F <<-\EOF &&
-	m-notes-1
-	-------
-	f-notes-1
-	-------
-	m-notes-2
-	-------
-	f-notes-2
-	-------
-	m-notes-3
-	EOF
-
-	echo "f-notes-1" >note_a &&
-	echo "f-notes-2" >note_b &&
-	git notes append -m "m-notes-1" -F note_a -m "m-notes-2" -F note_b -m "m-notes-3" --separator="-------" &&
-	git notes show >actual &&
-	test_cmp expect-combine_m_and_F actual
 '
 
 test_expect_success 'append to existing note with "git notes append"' '
@@ -669,6 +539,7 @@ test_expect_success 'append to existing note with "git notes append"' '
 
 		More notes appended with git notes append
 	EOF
+
 	git notes add -m "Initial set of notes" &&
 	git notes append -m "More notes appended with git notes append" &&
 	git notes show >actual &&
@@ -694,6 +565,7 @@ test_expect_success 'appending empty string does not change existing note' '
 '
 
 test_expect_success 'git notes append == add when there is no existing note' '
+	test_when_finished git notes remove HEAD &&
 	git notes remove HEAD &&
 	test_must_fail git notes list HEAD &&
 	git notes append -m "Initial set of notes${LF}${LF}More notes appended with git notes append" &&
@@ -702,9 +574,9 @@ test_expect_success 'git notes append == add when there is no existing note' '
 '
 
 test_expect_success 'appending empty string to non-existing note does not create note' '
-	git notes remove HEAD &&
 	test_must_fail git notes list HEAD &&
-	git notes append -m "" &&
+	git notes append -m "" >output 2>&1 &&
+	grep "Both original and appended notes are empty" output &&
 	test_must_fail git notes list HEAD
 '
 
@@ -958,33 +830,6 @@ test_expect_success 'create note from blob with "git notes add -C" reuses blob i
 	test_cmp expect actual &&
 	git notes list HEAD >actual &&
 	test_cmp blob actual
-'
-
-test_expect_success 'create note from blob with "-C", also specify "-m", "-F" and "--separator"' '
-	# 8th will be reuseed in following tests, so rollback when the test is done
-	test_when_finished "git notes remove && git notes add -C $(cat blob)" &&
-	commit=$(git rev-parse HEAD) &&
-	cat >expect <<-EOF &&
-		commit $commit
-		Author: A U Thor <author@example.com>
-		Date:   Thu Apr 7 15:20:13 2005 -0700
-
-		${indent}8th
-
-		Notes:
-		${indent}This is a blob object
-		${indent}-------
-		${indent}This is created by -m
-		${indent}-------
-		${indent}This is created by -F
-	EOF
-
-	git notes remove &&
-	echo "This is a blob object" | git hash-object -w --stdin >blob &&
-	echo "This is created by -F" >note_a &&
-	git notes add -C $(cat blob) -m "This is created by -m" -F note_a --separator="-------" &&
-	git log -1 >actual &&
-	test_cmp expect actual
 '
 
 test_expect_success 'create note from other note with "git notes add -c"' '
@@ -1469,9 +1314,9 @@ test_expect_success 'GIT_NOTES_REWRITE_REF overrides config' '
 
 test_expect_success 'git notes copy diagnoses too many or too few arguments' '
 	test_must_fail git notes copy 2>error &&
-	test_grep "too few arguments" error &&
+	test_i18ngrep "too few arguments" error &&
 	test_must_fail git notes copy one two three 2>error &&
-	test_grep "too many arguments" error
+	test_i18ngrep "too many arguments" error
 '
 
 test_expect_success 'git notes get-ref expands refs/heads/main to refs/notes/refs/heads/main' '

@@ -7,10 +7,9 @@
  * files. Useful when you write a file that you want to be
  * able to verify hasn't been messed with afterwards.
  */
-#include "git-compat-util.h"
+#include "cache.h"
 #include "progress.h"
 #include "csum-file.h"
-#include "hash.h"
 
 static void verify_buffer_or_die(struct hashfile *f,
 				 const void *buf,
@@ -68,7 +67,7 @@ int finalize_hashfile(struct hashfile *f, unsigned char *result,
 	hashflush(f);
 
 	if (f->skip_hash)
-		hashclr(f->buffer);
+		memset(f->buffer, 0, the_hash_algo->rawsz);
 	else
 		the_hash_algo->final_fn(f->buffer, &f->ctx);
 
@@ -207,7 +206,7 @@ int hashfile_truncate(struct hashfile *f, struct hashfile_checkpoint *checkpoint
 	    lseek(f->fd, offset, SEEK_SET) != offset)
 		return -1;
 	f->total = offset;
-	the_hash_algo->clone_fn(&f->ctx, &checkpoint->ctx);
+	f->ctx = checkpoint->ctx;
 	f->offset = 0; /* hashflush() was called in checkpoint */
 	return 0;
 }

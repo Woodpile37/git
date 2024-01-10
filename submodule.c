@@ -1,5 +1,5 @@
-#include "git-compat-util.h"
-#include "abspath.h"
+
+#include "cache.h"
 #include "repository.h"
 #include "config.h"
 #include "submodule-config.h"
@@ -7,9 +7,6 @@
 #include "dir.h"
 #include "diff.h"
 #include "commit.h"
-#include "environment.h"
-#include "gettext.h"
-#include "hex.h"
 #include "revision.h"
 #include "run-command.h"
 #include "diffcore.h"
@@ -17,18 +14,15 @@
 #include "string-list.h"
 #include "oid-array.h"
 #include "strvec.h"
+#include "blob.h"
 #include "thread-utils.h"
-#include "path.h"
+#include "quote.h"
 #include "remote.h"
 #include "worktree.h"
 #include "parse-options.h"
-#include "object-file.h"
-#include "object-name.h"
-#include "object-store-ll.h"
+#include "object-store.h"
 #include "commit-reach.h"
-#include "read-cache-ll.h"
-#include "setup.h"
-#include "trace2.h"
+#include "shallow.h"
 
 static int config_update_recurse_submodules = RECURSE_SUBMODULES_OFF;
 static int initialized_fetch_ref_tips;
@@ -71,7 +65,7 @@ int is_writing_gitmodules_ok(void)
 {
 	struct object_id oid;
 	return file_exists(GITMODULES_FILE) ||
-		(repo_get_oid(the_repository, GITMODULES_INDEX, &oid) < 0 && repo_get_oid(the_repository, GITMODULES_HEAD, &oid) < 0);
+		(get_oid(GITMODULES_INDEX, &oid) < 0 && get_oid(GITMODULES_HEAD, &oid) < 0);
 }
 
 /*
@@ -280,7 +274,8 @@ int is_tree_submodule_active(struct repository *repo,
 	free(key);
 
 	/* submodule.active is set */
-	if (!repo_config_get_string_multi(repo, "submodule.active", &sl)) {
+	sl = repo_config_get_value_multi(repo, "submodule.active");
+	if (sl) {
 		struct pathspec ps;
 		struct strvec args = STRVEC_INIT;
 		const struct string_list_item *item;
@@ -508,6 +503,8 @@ static void print_submodule_diff_summary(struct repository *r, struct rev_info *
 
 void prepare_submodule_repo_env(struct strvec *out)
 {
+	if (the_repository->settings.submodule_propagate_branches)
+		strvec_pushf(out, "%s=1", GIT_SUBMODULE_PROPAGATE_BRANCHES_ENVIRONMENT);
 	prepare_other_repo_env(out, DEFAULT_GIT_DIR_ENVIRONMENT);
 }
 
@@ -837,7 +834,7 @@ static void changed_submodule_data_clear(struct changed_submodule_data *cs_data)
 }
 
 static void collect_changed_submodules_cb(struct diff_queue_struct *q,
-					  struct diff_options *options UNUSED,
+					  struct diff_options *options,
 					  void *data)
 {
 	struct collect_changed_submodules_cb_data *me = data;
@@ -1374,6 +1371,18 @@ int submodule_touches_in_range(struct repository *r,
 	return ret;
 }
 
+struct submodule_parallel_status {
+	size_t index_count;
+	int result;
+
+	struct string_list *submodule_names;
+	struct repository *r;
+
+	/* Pending statuses by OIDs */
+	struct status_task **oid_status_tasks;
+	int oid_status_tasks_nr, oid_status_tasks_alloc;
+};
+
 struct submodule_parallel_fetch {
 	/*
 	 * The index of the last index entry processed by
@@ -1454,6 +1463,12 @@ struct fetch_task {
 	struct strvec git_args; /* Args for the child git process. */
 
 	struct oid_array *commits; /* Ensure these commits are fetched */
+};
+
+struct status_task {
+	const char *path;
+	unsigned dirty_submodule;
+	int ignore_untracked;
 };
 
 /**
@@ -1630,7 +1645,7 @@ get_fetch_task_from_changed(struct submodule_parallel_fetch *spf,
 		if (!task->repo) {
 			strbuf_addf(err, _("Could not access submodule '%s' at commit %s\n"),
 				    cs_data->path,
-				    repo_find_unique_abbrev(the_repository, cs_data->super_oid, DEFAULT_ABBREV));
+				    find_unique_abbrev(cs_data->super_oid, DEFAULT_ABBREV));
 
 			fetch_task_release(task);
 			free(task);
@@ -1641,8 +1656,8 @@ get_fetch_task_from_changed(struct submodule_parallel_fetch *spf,
 			strbuf_addf(err,
 				    _("Fetching submodule %s%s at commit %s\n"),
 				    spf->prefix, task->sub->path,
-				    repo_find_unique_abbrev(the_repository, cs_data->super_oid,
-							    DEFAULT_ABBREV));
+				    find_unique_abbrev(cs_data->super_oid,
+						       DEFAULT_ABBREV));
 
 		spf->changed_count++;
 		/*
@@ -1744,7 +1759,7 @@ static int get_next_submodule(struct child_process *cp, struct strbuf *err,
 	return 0;
 }
 
-static int fetch_start_failure(struct strbuf *err UNUSED,
+static int fetch_start_failure(struct strbuf *err,
 			       void *cb, void *task_cb)
 {
 	struct submodule_parallel_fetch *spf = cb;
@@ -1765,7 +1780,7 @@ static int commit_missing_in_sub(const struct object_id *oid, void *data)
 	return type != OBJ_COMMIT;
 }
 
-static int fetch_finish(int retvalue, struct strbuf *err UNUSED,
+static int fetch_finish(int retvalue, struct strbuf *err,
 			void *cb, void *task_cb)
 {
 	struct submodule_parallel_fetch *spf = cb;
@@ -1875,6 +1890,45 @@ out:
 	return spf.result;
 }
 
+static int parse_status_porcelain(char *str, size_t len,
+				  unsigned *dirty_submodule,
+				  int ignore_untracked)
+{
+	/* regular untracked files */
+	if (str[0] == '?')
+		*dirty_submodule |= DIRTY_SUBMODULE_UNTRACKED;
+
+	if (str[0] == 'u' ||
+	    str[0] == '1' ||
+	    str[0] == '2') {
+		/* T = line type, XY = status, SSSS = submodule state */
+		if (len < strlen("T XY SSSS"))
+			BUG("invalid status --porcelain=2 line %s",
+			    str);
+
+		if (str[5] == 'S' && str[8] == 'U')
+			/* nested untracked file */
+			*dirty_submodule |= DIRTY_SUBMODULE_UNTRACKED;
+
+		if (str[0] == 'u' ||
+		    str[0] == '2' ||
+		    memcmp(str + 5, "S..U", 4))
+			/* other change */
+			*dirty_submodule |= DIRTY_SUBMODULE_MODIFIED;
+	}
+
+	if ((*dirty_submodule & DIRTY_SUBMODULE_MODIFIED) &&
+	    ((*dirty_submodule & DIRTY_SUBMODULE_UNTRACKED) ||
+	     ignore_untracked)) {
+		/*
+		* We're not interested in any further information from
+		* the child any more, neither output nor its exit code.
+		*/
+		return 1;
+	}
+	return 0;
+}
+
 unsigned is_submodule_modified(const char *path, int ignore_untracked)
 {
 	struct child_process cp = CHILD_PROCESS_INIT;
@@ -1911,39 +1965,13 @@ unsigned is_submodule_modified(const char *path, int ignore_untracked)
 
 	fp = xfdopen(cp.out, "r");
 	while (strbuf_getwholeline(&buf, fp, '\n') != EOF) {
-		/* regular untracked files */
-		if (buf.buf[0] == '?')
-			dirty_submodule |= DIRTY_SUBMODULE_UNTRACKED;
+		char *str = buf.buf;
+		const size_t len = buf.len;
 
-		if (buf.buf[0] == 'u' ||
-		    buf.buf[0] == '1' ||
-		    buf.buf[0] == '2') {
-			/* T = line type, XY = status, SSSS = submodule state */
-			if (buf.len < strlen("T XY SSSS"))
-				BUG("invalid status --porcelain=2 line %s",
-				    buf.buf);
-
-			if (buf.buf[5] == 'S' && buf.buf[8] == 'U')
-				/* nested untracked file */
-				dirty_submodule |= DIRTY_SUBMODULE_UNTRACKED;
-
-			if (buf.buf[0] == 'u' ||
-			    buf.buf[0] == '2' ||
-			    memcmp(buf.buf + 5, "S..U", 4))
-				/* other change */
-				dirty_submodule |= DIRTY_SUBMODULE_MODIFIED;
-		}
-
-		if ((dirty_submodule & DIRTY_SUBMODULE_MODIFIED) &&
-		    ((dirty_submodule & DIRTY_SUBMODULE_UNTRACKED) ||
-		     ignore_untracked)) {
-			/*
-			 * We're not interested in any further information from
-			 * the child any more, neither output nor its exit code.
-			 */
-			ignore_cp_exit_code = 1;
+		ignore_cp_exit_code = parse_status_porcelain(str, len, &dirty_submodule,
+							     ignore_untracked);
+		if (ignore_cp_exit_code)
 			break;
-		}
 	}
 	fclose(fp);
 
@@ -1952,6 +1980,142 @@ unsigned is_submodule_modified(const char *path, int ignore_untracked)
 
 	strbuf_release(&buf);
 	return dirty_submodule;
+}
+
+static struct status_task *
+get_status_task_from_index(struct submodule_parallel_status *sps,
+			   struct strbuf *err)
+{
+	for (; sps->index_count < sps->submodule_names->nr; sps->index_count++) {
+		struct submodule_status_util *util = sps->submodule_names->items[sps->index_count].util;
+		const struct cache_entry *ce = util->ce;
+		struct status_task *task;
+		struct status_task tmp = {
+			.path = ce->name,
+			.dirty_submodule = util->dirty_submodule,
+			.ignore_untracked = util->ignore_untracked,
+		};
+		struct strbuf buf = STRBUF_INIT;
+		const char *git_dir;
+
+		strbuf_addf(&buf, "%s/.git", ce->name);
+		git_dir = read_gitfile(buf.buf);
+		if (!git_dir)
+			git_dir = buf.buf;
+		if (!is_git_directory(git_dir)) {
+			if (is_directory(git_dir))
+				die(_("'%s' not recognized as a git repository"), git_dir);
+			strbuf_release(&buf);
+			/* The submodule is not checked out, so it is not modified */
+			util->dirty_submodule = 0;
+			continue;
+		}
+		strbuf_release(&buf);
+
+		task = xmalloc(sizeof(*task));
+		memcpy(task, &tmp, sizeof(*task));
+		sps->index_count++;
+		return task;
+	}
+	return NULL;
+}
+
+
+static int get_next_submodule_status(struct child_process *cp,
+				     struct strbuf *err, void *data,
+				     void **task_cb)
+{
+	struct submodule_parallel_status *sps = data;
+	struct status_task *task = get_status_task_from_index(sps, err);
+
+	if (!task)
+		return 0;
+
+	child_process_init(cp);
+	prepare_submodule_repo_env_in_gitdir(&cp->env);
+
+	strvec_init(&cp->args);
+	strvec_pushl(&cp->args, "status", "--porcelain=2", NULL);
+	if (task->ignore_untracked)
+		strvec_push(&cp->args, "-uno");
+
+	prepare_submodule_repo_env(&cp->env);
+	cp->git_cmd = 1;
+	cp->dir = task->path;
+	*task_cb = task;
+	return 1;
+}
+
+static int status_start_failure(struct strbuf *err,
+			        void *cb, void *task_cb)
+{
+	struct submodule_parallel_status *sps = cb;
+
+	sps->result = 1;
+	return 0;
+}
+
+static void status_duplicate_output(struct strbuf *process_out,
+				    struct strbuf *out,
+				    void *cb, void *task_cb)
+{
+	struct status_task *task = task_cb;
+	struct string_list list = STRING_LIST_INIT_DUP;
+	struct string_list_item *item;
+
+	string_list_split(&list, process_out->buf, '\n', -1);
+
+	for_each_string_list_item(item, &list) {
+		if (parse_status_porcelain(item->string,
+				   strlen(item->string),
+				   &task->dirty_submodule,
+				   task->ignore_untracked))
+			break;
+	}
+	string_list_clear(&list, 0);
+	strbuf_reset(out);
+}
+
+static int status_finish(int retvalue, struct strbuf *err,
+			 void *cb, void *task_cb)
+{
+	struct submodule_parallel_status *sps = cb;
+	struct status_task *task = task_cb;
+	struct string_list_item *it =
+		string_list_lookup(sps->submodule_names, task->path);
+	struct submodule_status_util *util = it->util;
+
+	util->dirty_submodule = task->dirty_submodule;
+	free(task);
+
+	return 0;
+}
+
+int get_submodules_status(struct repository *r,
+			  struct string_list *submodules,
+			  int max_parallel_jobs)
+{
+	struct submodule_parallel_status sps = {
+                .r = r,
+                .submodule_names = submodules,
+        };
+	const struct run_process_parallel_opts opts = {
+		.tr2_category = "submodule",
+		.tr2_label = "parallel/status",
+
+		.processes = max_parallel_jobs,
+
+		.get_next_task = get_next_submodule_status,
+		.start_failure = status_start_failure,
+		.duplicate_output = status_duplicate_output,
+		.task_finished = status_finish,
+		.data = &sps,
+	};
+
+	string_list_sort(sps.submodule_names);
+	run_processes_parallel(&opts);
+
+	return sps.result;
 }
 
 int submodule_uses_gitfile(const char *path)
@@ -2059,6 +2223,14 @@ void submodule_unset_core_worktree(const struct submodule *sub)
 	strbuf_release(&config_path);
 }
 
+static const char *get_super_prefix_or_empty(void)
+{
+	const char *s = get_super_prefix();
+	if (!s)
+		s = "";
+	return s;
+}
+
 static int submodule_has_dirty_index(const struct submodule *sub)
 {
 	struct child_process cp = CHILD_PROCESS_INIT;
@@ -2077,7 +2249,7 @@ static int submodule_has_dirty_index(const struct submodule *sub)
 	return finish_command(&cp);
 }
 
-static void submodule_reset_index(const char *path, const char *super_prefix)
+static void submodule_reset_index(const char *path)
 {
 	struct child_process cp = CHILD_PROCESS_INIT;
 	prepare_submodule_repo_env(&cp.env);
@@ -2086,10 +2258,10 @@ static void submodule_reset_index(const char *path, const char *super_prefix)
 	cp.no_stdin = 1;
 	cp.dir = path;
 
+	strvec_pushf(&cp.args, "--super-prefix=%s%s/",
+		     get_super_prefix_or_empty(), path);
 	/* TODO: determine if this might overwright untracked files */
 	strvec_pushl(&cp.args, "read-tree", "-u", "--reset", NULL);
-	strvec_pushf(&cp.args, "--super-prefix=%s%s/",
-		     (super_prefix ? super_prefix : ""), path);
 
 	strvec_push(&cp.args, empty_tree_oid_hex());
 
@@ -2102,9 +2274,10 @@ static void submodule_reset_index(const char *path, const char *super_prefix)
  * For edge cases (a submodule coming into existence or removing a submodule)
  * pass NULL for old or new respectively.
  */
-int submodule_move_head(const char *path, const char *super_prefix,
-			const char *old_head, const char *new_head,
-			unsigned flags)
+int submodule_move_head(const char *path,
+			 const char *old_head,
+			 const char *new_head,
+			 unsigned flags)
 {
 	int ret = 0;
 	struct child_process cp = CHILD_PROCESS_INIT;
@@ -2141,8 +2314,7 @@ int submodule_move_head(const char *path, const char *super_prefix,
 	if (!(flags & SUBMODULE_MOVE_HEAD_DRY_RUN)) {
 		if (old_head) {
 			if (!submodule_uses_gitfile(path))
-				absorb_git_dir_into_superproject(path,
-								 super_prefix);
+				absorb_git_dir_into_superproject(path);
 		} else {
 			struct strbuf gitdir = STRBUF_INIT;
 			submodule_name_to_gitdir(&gitdir, the_repository,
@@ -2151,7 +2323,7 @@ int submodule_move_head(const char *path, const char *super_prefix,
 			strbuf_release(&gitdir);
 
 			/* make sure the index is clean as well */
-			submodule_reset_index(path, super_prefix);
+			submodule_reset_index(path);
 		}
 
 		if (old_head && (flags & SUBMODULE_MOVE_HEAD_FORCE)) {
@@ -2169,9 +2341,9 @@ int submodule_move_head(const char *path, const char *super_prefix,
 	cp.no_stdin = 1;
 	cp.dir = path;
 
-	strvec_pushl(&cp.args, "read-tree", "--recurse-submodules", NULL);
 	strvec_pushf(&cp.args, "--super-prefix=%s%s/",
-		     (super_prefix ? super_prefix : ""), path);
+		     get_super_prefix_or_empty(), path);
+	strvec_pushl(&cp.args, "read-tree", "--recurse-submodules", NULL);
 
 	if (flags & SUBMODULE_MOVE_HEAD_DRY_RUN)
 		strvec_push(&cp.args, "-n");
@@ -2271,12 +2443,12 @@ int validate_submodule_git_dir(char *git_dir, const char *submodule_name)
  * Embeds a single submodules git directory into the superprojects git dir,
  * non recursively.
  */
-static void relocate_single_git_dir_into_superproject(const char *path,
-						      const char *super_prefix)
+static void relocate_single_git_dir_into_superproject(const char *path)
 {
 	char *old_git_dir = NULL, *real_old_git_dir = NULL, *real_new_git_dir = NULL;
 	struct strbuf new_gitdir = STRBUF_INIT;
 	const struct submodule *sub;
+	size_t off = 0;
 
 	if (submodule_uses_worktrees(path))
 		die(_("relocate_gitdir for submodule '%s' with "
@@ -2301,9 +2473,12 @@ static void relocate_single_git_dir_into_superproject(const char *path,
 		die(_("could not create directory '%s'"), new_gitdir.buf);
 	real_new_git_dir = real_pathdup(new_gitdir.buf, 1);
 
-	fprintf(stderr, _("Migrating git directory of '%s%s' from\n'%s' to\n'%s'\n"),
-		super_prefix ? super_prefix : "", path,
-		real_old_git_dir, real_new_git_dir);
+	while (real_old_git_dir[off] && real_new_git_dir[off] &&
+	       real_old_git_dir[off] == real_new_git_dir[off])
+		off++;
+	fprintf(stderr, _("Migrating git directory of '%s%s' from '%s' to '%s'\n"),
+		get_super_prefix_or_empty(), path,
+		real_old_git_dir + off, real_new_git_dir + off);
 
 	relocate_gitdir(path, real_old_git_dir, real_new_git_dir);
 
@@ -2313,8 +2488,7 @@ static void relocate_single_git_dir_into_superproject(const char *path,
 	strbuf_release(&new_gitdir);
 }
 
-static void absorb_git_dir_into_superproject_recurse(const char *path,
-						     const char *super_prefix)
+static void absorb_git_dir_into_superproject_recurse(const char *path)
 {
 
 	struct child_process cp = CHILD_PROCESS_INIT;
@@ -2322,11 +2496,10 @@ static void absorb_git_dir_into_superproject_recurse(const char *path,
 	cp.dir = path;
 	cp.git_cmd = 1;
 	cp.no_stdin = 1;
+	strvec_pushf(&cp.args, "--super-prefix=%s%s/",
+		     get_super_prefix_or_empty(), path);
 	strvec_pushl(&cp.args, "submodule--helper",
 		     "absorbgitdirs", NULL);
-	strvec_pushf(&cp.args, "--super-prefix=%s%s/", super_prefix ?
-		     super_prefix : "", path);
-
 	prepare_submodule_repo_env(&cp.env);
 	if (run_command(&cp))
 		die(_("could not recurse into submodule '%s'"), path);
@@ -2337,8 +2510,7 @@ static void absorb_git_dir_into_superproject_recurse(const char *path,
  * having its git directory within the working tree to the git dir nested
  * in its superprojects git dir under modules/.
  */
-void absorb_git_dir_into_superproject(const char *path,
-				      const char *super_prefix)
+void absorb_git_dir_into_superproject(const char *path)
 {
 	int err_code;
 	const char *sub_git_dir;
@@ -2380,14 +2552,14 @@ void absorb_git_dir_into_superproject(const char *path,
 		char *real_common_git_dir = real_pathdup(get_git_common_dir(), 1);
 
 		if (!starts_with(real_sub_git_dir, real_common_git_dir))
-			relocate_single_git_dir_into_superproject(path, super_prefix);
+			relocate_single_git_dir_into_superproject(path);
 
 		free(real_sub_git_dir);
 		free(real_common_git_dir);
 	}
 	strbuf_release(&gitdir);
 
-	absorb_git_dir_into_superproject_recurse(path, super_prefix);
+	absorb_git_dir_into_superproject_recurse(path);
 }
 
 int get_superproject_working_tree(struct strbuf *buf)

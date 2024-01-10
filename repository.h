@@ -1,6 +1,9 @@
 #ifndef REPOSITORY_H
 #define REPOSITORY_H
 
+#include "git-compat-util.h"
+#include "path.h"
+
 struct config_set;
 struct fsmonitor_settings;
 struct git_hash_algo;
@@ -24,35 +27,22 @@ enum fetch_negotiation_setting {
 	FETCH_NEGOTIATION_NOOP,
 };
 
-#define REF_STORAGE_FORMAT_UNKNOWN 0
-#define REF_STORAGE_FORMAT_FILES   1
-
 struct repo_settings {
 	int initialized;
 
 	int core_commit_graph;
 	int commit_graph_generation_version;
-	int commit_graph_changed_paths_version;
+	int commit_graph_read_changed_paths;
 	int gc_write_commit_graph;
+	int gc_cruft_packs;
 	int fetch_write_commit_graph;
 	int command_requires_full_index;
 	int sparse_index;
-	int pack_read_reverse_index;
-	int pack_use_bitmap_boundary_traversal;
-
-	/*
-	 * Does this repository have core.useReplaceRefs=true (on by
-	 * default)? This provides a repository-scoped version of this
-	 * config, though it could be disabled process-wide via some Git
-	 * builtins or the --no-replace-objects option. See
-	 * replace_refs_enabled() for more details.
-	 */
-	int read_replace_refs;
+	int submodule_propagate_branches;
 
 	struct fsmonitor_settings *fsmonitor; /* lazily loaded */
 
 	int index_version;
-	int index_skip_hash;
 	enum untracked_cache_setting core_untracked_cache;
 
 	int pack_use_sparse;
@@ -71,6 +61,12 @@ struct repo_path_cache {
 	char *auto_merge;
 	char *fetch_head;
 	char *shallow;
+};
+
+enum ref_format_flags {
+	REF_FORMAT_FILES = (1 << 0),
+	REF_FORMAT_PACKED = (1 << 1),
+	REF_FORMAT_PACKED_V2 = (1 << 2),
 };
 
 struct repository {
@@ -107,6 +103,7 @@ struct repository {
 	 * the ref object.
 	 */
 	struct ref_store *refs_private;
+	enum ref_format_flags ref_format;
 
 	/*
 	 * Contains path to often used file names.
@@ -163,12 +160,6 @@ struct repository {
 	/* Repository's current hash algorithm, as serialized on disk. */
 	const struct git_hash_algo *hash_algo;
 
-	/* Repository's compatibility hash algorithm. */
-	const struct git_hash_algo *compat_hash_algo;
-
-	/* Repository's reference storage format, as serialized on disk. */
-	unsigned int ref_storage_format;
-
 	/* A unique-id for tracing purposes. */
 	int trace2_repo_id;
 
@@ -180,16 +171,12 @@ struct repository {
 	struct promisor_remote_config *promisor_remote_config;
 
 	/* Configurations */
-	int repository_format_worktree_config;
 
 	/* Indicate if a repository has a different 'commondir' from 'gitdir' */
 	unsigned different_commondir:1;
 };
 
 extern struct repository *the_repository;
-#ifdef USE_THE_INDEX_VARIABLE
-extern struct index_state the_index;
-#endif
 
 /*
  * Define a custom repository layout. Any field can be NULL, which
@@ -208,8 +195,6 @@ void repo_set_gitdir(struct repository *repo, const char *root,
 		     const struct set_gitdir_args *extra_args);
 void repo_set_worktree(struct repository *repo, const char *path);
 void repo_set_hash_algo(struct repository *repo, int algo);
-void repo_set_compat_hash_algo(struct repository *repo, int compat_algo);
-void repo_set_ref_storage_format(struct repository *repo, unsigned int format);
 void initialize_the_repository(void);
 RESULT_MUST_BE_USED
 int repo_init(struct repository *r, const char *gitdir, const char *worktree);
@@ -243,6 +228,9 @@ int repo_hold_locked_index(struct repository *repo,
 			   struct lock_file *lf,
 			   int flags);
 
+int repo_read_index_preload(struct repository *,
+			    const struct pathspec *pathspec,
+			    unsigned refresh_flags);
 int repo_read_index_unmerged(struct repository *);
 /*
  * Opportunistically update the index but do not complain if we can't.

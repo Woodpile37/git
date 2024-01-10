@@ -10,7 +10,6 @@ TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup a real submodule' '
-	cwd="$(pwd)" &&
 	git init sub1 &&
 	test_commit -C sub1 first &&
 	git submodule add ./sub1 &&
@@ -27,10 +26,8 @@ test_expect_success 'absorb the git dir' '
 	>actual.2 &&
 	git status >expect.1 &&
 	git -C sub1 rev-parse HEAD >expect.2 &&
-	cat >expect <<-EOF &&
-	Migrating git directory of '\''sub1'\'' from
-	'\''$cwd/sub1/.git'\'' to
-	'\''$cwd/.git/modules/sub1'\''
+	cat >expect <<-\EOF &&
+	Migrating git directory of '\''sub1'\'' from '\''sub1/.git'\'' to '\''.git/modules/sub1'\''
 	EOF
 	git submodule absorbgitdirs 2>actual &&
 	test_cmp expect actual &&
@@ -66,10 +63,8 @@ test_expect_success 'setup nested submodule' '
 test_expect_success 'absorb the git dir in a nested submodule' '
 	git status >expect.1 &&
 	git -C sub1/nested rev-parse HEAD >expect.2 &&
-	cat >expect <<-EOF &&
-	Migrating git directory of '\''sub1/nested'\'' from
-	'\''$cwd/sub1/nested/.git'\'' to
-	'\''$cwd/.git/modules/sub1/modules/nested'\''
+	cat >expect <<-\EOF &&
+	Migrating git directory of '\''sub1/nested'\'' from '\''sub1/nested/.git'\'' to '\''.git/modules/sub1/modules/nested'\''
 	EOF
 	git submodule absorbgitdirs 2>actual &&
 	test_cmp expect actual &&
@@ -103,10 +98,8 @@ test_expect_success 're-setup nested submodule' '
 test_expect_success 'absorb the git dir in a nested submodule' '
 	git status >expect.1 &&
 	git -C sub1/nested rev-parse HEAD >expect.2 &&
-	cat >expect <<-EOF &&
-	Migrating git directory of '\''sub1'\'' from
-	'\''$cwd/sub1/.git'\'' to
-	'\''$cwd/.git/modules/sub1'\''
+	cat >expect <<-\EOF &&
+	Migrating git directory of '\''sub1'\'' from '\''sub1/.git'\'' to '\''.git/modules/sub1'\''
 	EOF
 	git submodule absorbgitdirs 2>actual &&
 	test_cmp expect actual &&
@@ -117,27 +110,6 @@ test_expect_success 'absorb the git dir in a nested submodule' '
 	git -C sub1/nested rev-parse HEAD >actual.2 &&
 	test_cmp expect.1 actual.1 &&
 	test_cmp expect.2 actual.2
-'
-
-test_expect_success 'absorb the git dir outside of primary worktree' '
-	test_when_finished "rm -rf repo-bare.git" &&
-	git clone --bare . repo-bare.git &&
-	test_when_finished "rm -rf repo-wt" &&
-	git -C repo-bare.git worktree add ../repo-wt &&
-
-	test_when_finished "rm -f .gitconfig" &&
-	test_config_global protocol.file.allow always &&
-	git -C repo-wt submodule update --init &&
-	git init repo-wt/sub2 &&
-	test_commit -C repo-wt/sub2 A &&
-	git -C repo-wt submodule add ./sub2 sub2 &&
-	cat >expect <<-EOF &&
-	Migrating git directory of '\''sub2'\'' from
-	'\''$cwd/repo-wt/sub2/.git'\'' to
-	'\''$cwd/repo-bare.git/worktrees/repo-wt/modules/sub2'\''
-	EOF
-	git -C repo-wt submodule absorbgitdirs 2>actual &&
-	test_cmp expect actual
 '
 
 test_expect_success 'setup a gitlink with missing .gitmodules entry' '

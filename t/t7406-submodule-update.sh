@@ -945,7 +945,7 @@ test_expect_success 'submodule update places git-dir in superprojects git-dir re
 	git clone super_update_r super_update_r2 &&
 	(cd super_update_r2 &&
 	 git submodule update --init --recursive >actual &&
-	 test_grep "Submodule path .submodule/subsubmodule.: checked out" actual &&
+	 test_i18ngrep "Submodule path .submodule/subsubmodule.: checked out" actual &&
 	 (cd submodule/subsubmodule &&
 	  git log > ../../expected
 	 ) &&
@@ -1025,7 +1025,7 @@ test_expect_success 'submodule update clone shallow submodule outside of depth' 
 		# unadvertised objects, so restrict this test to v0.
 		test_must_fail env GIT_TEST_PROTOCOL_VERSION=0 \
 			git submodule update --init --depth=1 2>actual &&
-		test_grep "Direct fetching of that commit failed." actual &&
+		test_i18ngrep "Direct fetching of that commit failed." actual &&
 		git -C ../submodule config uploadpack.allowReachableSHA1InWant true &&
 		git submodule update --init --depth=1 >actual &&
 		git -C submodule log --oneline >out &&
@@ -1039,7 +1039,7 @@ test_expect_success 'submodule update --recursive drops module name before recur
 	  git checkout HEAD^
 	 ) &&
 	 git submodule update --recursive deeper/submodule >actual &&
-	 test_grep "Submodule path .deeper/submodule/subsubmodule.: checked out" actual
+	 test_i18ngrep "Submodule path .deeper/submodule/subsubmodule.: checked out" actual
 	)
 '
 
@@ -1179,27 +1179,160 @@ test_expect_success 'submodule update --recursive skip submodules with strategy=
 	test_cmp expect.err actual.err
 '
 
-add_submodule_commit_and_validate () {
-	HASH=$(git rev-parse HEAD) &&
-	git update-index --add --cacheinfo 160000,$HASH,sub &&
-	git commit -m "create submodule" &&
-	echo "160000 commit $HASH	sub" >expect &&
-	git ls-tree HEAD -- sub >actual &&
-	test_cmp expect actual
+test_expect_success 'setup superproject with submodule.propagateBranches' '
+	git init sub1 &&
+	test_commit -C sub1 "sub1" &&
+	git init branch-super &&
+	git -C branch-super submodule add ../sub1 sub1 &&
+	git -C branch-super commit -m "super" &&
+
+	# Clone into a clean repo that we can cp around
+	git clone --recurse-submodules \
+		-c submodule.propagateBranches=true \
+		branch-super branch-super-clean &&
+	git -C branch-super-clean config submodule.propagateBranches true &&
+
+	# sub2 will not be in the clone. We will fetch the containing
+	# superproject commit and clone sub2 with "git submodule update".
+	git init sub2 &&
+	test_commit -C sub2 "sub2" &&
+	git -C branch-super submodule add ../sub2 sub2 &&
+	git -C branch-super commit -m "add sub2"
+'
+
+test_clean_submodule ()
+{
+	local negate super_dir sub_dir expect_oid actual_oid &&
+	if test "$1" = "!"
+	then
+		negate=t
+		shift
+	fi
+	super_dir="$1" &&
+	sub_dir="$2" &&
+	expect_oid="$(git -C "$super_dir" rev-parse ":$sub_dir")" &&
+	actual_oid="$(git -C "$super_dir/$sub_dir" rev-parse HEAD)" &&
+	if test -n "$negate"
+	then
+		! test "$expect_oid" = "$actual_oid"
+	else
+		test "$expect_oid" = "$actual_oid"
+	fi
 }
 
-test_expect_success 'commit with staged submodule change' '
-	add_submodule_commit_and_validate
+# Test the behavior of a newly cloned submodule
+test_expect_success 'branches - newly-cloned submodule, detached HEAD' '
+	test_when_finished "rm -fr branch-super-cloned" &&
+	cp -r branch-super-clean branch-super-cloned &&
+
+	git -C branch-super-cloned fetch origin main &&
+	git -C branch-super-cloned checkout FETCH_HEAD &&
+	git -C branch-super-cloned/sub1 checkout --detach &&
+	git -C branch-super-cloned submodule update &&
+
+	# sub1 and sub2 should be in detached HEAD
+	git -C branch-super-cloned/sub1 rev-parse --verify HEAD &&
+	test_must_fail git -C branch-super-cloned/sub1 symbolic-ref HEAD &&
+	test_clean_submodule branch-super-cloned sub1 &&
+	git -C branch-super-cloned/sub2 rev-parse --verify HEAD &&
+	test_must_fail git -C branch-super-cloned/sub2 symbolic-ref HEAD &&
+	test_clean_submodule branch-super-cloned sub2
 '
 
-test_expect_success 'commit with staged submodule change with ignoreSubmodules dirty' '
-	test_config diff.ignoreSubmodules dirty &&
-	add_submodule_commit_and_validate
+test_expect_success 'branches - newly-cloned submodule, branch checked out' '
+	test_when_finished "rm -fr branch-super-cloned" &&
+	cp -r branch-super-clean branch-super-cloned &&
+
+	git -C branch-super-cloned fetch origin main &&
+	git -C branch-super-cloned checkout FETCH_HEAD &&
+	git -C branch-super-cloned branch new-branch &&
+	git -C branch-super-cloned checkout new-branch &&
+	git -C branch-super-cloned/sub1 branch new-branch &&
+	git -C branch-super-cloned submodule update &&
+
+	# Ignore sub1, we will test it later.
+	# sub2 should check out the branch
+	HEAD_BRANCH2=$(git -C branch-super-cloned/sub2 symbolic-ref HEAD) &&
+	test $HEAD_BRANCH2 = "refs/heads/new-branch" &&
+	test_clean_submodule branch-super-cloned sub2
 '
 
-test_expect_success 'commit with staged submodule change with ignoreSubmodules all' '
-	test_config diff.ignoreSubmodules all &&
-	add_submodule_commit_and_validate
+# Test the behavior of an already-cloned submodule.
+# NEEDSWORK When updating with branches, we always use the branch instead of the
+# gitlink's OID. This results in some imperfect behavior:
+#
+# - If the gitlink's OID disagrees with the branch OID, updating with branches
+#   may result in a dirty worktree
+# - If the branch does not exist, the update fails.
+#
+# We will reevaluate when "git checkout --recurse-submodules" supports branches
+# For now, just test for this imperfect behavior.
+test_expect_success 'branches - correct branch checked out, OIDs agree' '
+	test_when_finished "rm -fr branch-super-cloned" &&
+	cp -r branch-super-clean branch-super-cloned &&
+
+	git -C branch-super-cloned branch --recurse-submodules new-branch &&
+	git -C branch-super-cloned checkout new-branch &&
+	git -C branch-super-cloned/sub1 checkout new-branch &&
+	git -C branch-super-cloned submodule update &&
+
+	HEAD_BRANCH1=$(git -C branch-super-cloned/sub1 symbolic-ref HEAD) &&
+	test $HEAD_BRANCH1 = "refs/heads/new-branch" &&
+	test_clean_submodule branch-super-cloned sub1
+'
+
+test_expect_success 'branches - correct branch checked out, OIDs disagree' '
+	test_when_finished "rm -fr branch-super-cloned" &&
+	cp -r branch-super-clean branch-super-cloned &&
+
+	git -C branch-super-cloned branch --recurse-submodules new-branch &&
+	git -C branch-super-cloned checkout new-branch &&
+	git -C branch-super-cloned/sub1 checkout new-branch &&
+	test_commit -C branch-super-cloned/sub1 new-commit &&
+	git -C branch-super-cloned submodule update &&
+
+	HEAD_BRANCH1=$(git -C branch-super-cloned/sub1 symbolic-ref HEAD) &&
+	test $HEAD_BRANCH1 = "refs/heads/new-branch" &&
+	test_clean_submodule ! branch-super-cloned sub1
+'
+
+test_expect_success 'branches - other branch checked out, correct branch exists, OIDs agree' '
+	test_when_finished "rm -fr branch-super-cloned" &&
+	cp -r branch-super-clean branch-super-cloned &&
+
+	git -C branch-super-cloned branch --recurse-submodules new-branch &&
+	git -C branch-super-cloned checkout new-branch &&
+	git -C branch-super-cloned/sub1 checkout main &&
+	git -C branch-super-cloned submodule update &&
+
+	HEAD_BRANCH1=$(git -C branch-super-cloned/sub1 symbolic-ref HEAD) &&
+	test $HEAD_BRANCH1 = "refs/heads/new-branch" &&
+	test_clean_submodule branch-super-cloned sub1
+'
+
+test_expect_success 'branches - other branch checked out, correct branch exists, OIDs disagree' '
+	test_when_finished "rm -fr branch-super-cloned" &&
+	cp -r branch-super-clean branch-super-cloned &&
+
+	git -C branch-super-cloned branch --recurse-submodules new-branch &&
+	git -C branch-super-cloned checkout new-branch &&
+	git -C branch-super-cloned/sub1 checkout new-branch &&
+	test_commit -C branch-super-cloned/sub1 new-commit &&
+	git -C branch-super-cloned/sub1 checkout main &&
+	git -C branch-super-cloned submodule update &&
+
+	HEAD_BRANCH1=$(git -C branch-super-cloned/sub1 symbolic-ref HEAD) &&
+	test $HEAD_BRANCH1 = "refs/heads/new-branch" &&
+	test_clean_submodule ! branch-super-cloned sub1
+'
+
+test_expect_success 'branches - other branch checked out, correct branch does not exist' '
+	test_when_finished "rm -fr branch-super-cloned" &&
+	cp -r branch-super-clean branch-super-cloned &&
+
+	git -C branch-super-cloned branch new-branch &&
+	git -C branch-super-cloned checkout new-branch &&
+	test_must_fail git -C branch-super-cloned submodule update
 '
 
 test_done

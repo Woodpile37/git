@@ -1,16 +1,9 @@
-#include "git-compat-util.h"
-#include "advice.h"
+#include "cache.h"
 #include "wt-status.h"
 #include "object.h"
 #include "dir.h"
 #include "commit.h"
 #include "diff.h"
-#include "environment.h"
-#include "gettext.h"
-#include "hash.h"
-#include "hex.h"
-#include "object-name.h"
-#include "path.h"
 #include "revision.h"
 #include "diffcore.h"
 #include "quote.h"
@@ -20,12 +13,7 @@
 #include "refs.h"
 #include "submodule.h"
 #include "column.h"
-#include "read-cache.h"
-#include "setup.h"
 #include "strbuf.h"
-#include "trace.h"
-#include "trace2.h"
-#include "tree.h"
 #include "utf8.h"
 #include "worktree.h"
 #include "lockfile.h"
@@ -452,7 +440,7 @@ static char short_submodule_status(struct wt_status_change_data *d)
 }
 
 static void wt_status_collect_changed_cb(struct diff_queue_struct *q,
-					 struct diff_options *options UNUSED,
+					 struct diff_options *options,
 					 void *data)
 {
 	struct wt_status *s = data;
@@ -539,7 +527,7 @@ static int unmerged_mask(struct index_state *istate, const char *path)
 }
 
 static void wt_status_collect_updated_cb(struct diff_queue_struct *q,
-					 struct diff_options *options UNUSED,
+					 struct diff_options *options,
 					 void *data)
 {
 	struct wt_status *s = data;
@@ -675,7 +663,7 @@ static void wt_status_collect_changes_index(struct wt_status *s)
 	rev.diffopt.flags.recursive = 1;
 
 	copy_pathspec(&rev.prune_data, &s->pathspec);
-	run_diff_index(&rev, DIFF_INDEX_CACHED);
+	run_diff_index(&rev, 1);
 	release_revisions(&rev);
 }
 
@@ -739,7 +727,7 @@ static void wt_status_collect_changes_initial(struct wt_status *s)
 			ps.max_depth = -1;
 
 			strbuf_add(&base, ce->name, ce->ce_namelen);
-			read_tree_at(istate->repo, tree, &base, 0, &ps,
+			read_tree_at(istate->repo, tree, &base, &ps,
 				     add_file_to_list, s);
 			continue;
 		}
@@ -861,7 +849,6 @@ void wt_status_state_free_buffers(struct wt_status_state *state)
 	FREE_AND_NULL(state->branch);
 	FREE_AND_NULL(state->onto);
 	FREE_AND_NULL(state->detached_from);
-	FREE_AND_NULL(state->bisecting_from);
 }
 
 static void wt_longstatus_print_unmerged(struct wt_status *s)
@@ -1028,7 +1015,7 @@ static void wt_longstatus_print_submodule_summary(struct wt_status *s, int uncom
 	if (s->display_comment_prefix) {
 		size_t len;
 		summary_content = strbuf_detach(&summary, &len);
-		strbuf_add_commented_lines(&summary, summary_content, len, comment_line_char);
+		strbuf_add_commented_lines(&summary, summary_content, len);
 		free(summary_content);
 	}
 
@@ -1103,8 +1090,8 @@ void wt_status_append_cut_line(struct strbuf *buf)
 {
 	const char *explanation = _("Do not modify or remove the line above.\nEverything below it will be ignored.");
 
-	strbuf_commented_addf(buf, comment_line_char, "%s", cut_line);
-	strbuf_add_commented_lines(buf, explanation, strlen(explanation), comment_line_char);
+	strbuf_commented_addf(buf, "%s", cut_line);
+	strbuf_add_commented_lines(buf, explanation, strlen(explanation));
 }
 
 void wt_status_add_cut_line(FILE *fp)
@@ -1157,7 +1144,7 @@ static void wt_longstatus_print_verbose(struct wt_status *s)
 		rev.diffopt.a_prefix = "c/";
 		rev.diffopt.b_prefix = "i/";
 	} /* else use prefix as per user config */
-	run_diff_index(&rev, DIFF_INDEX_CACHED);
+	run_diff_index(&rev, 1);
 	if (s->verbose > 1 &&
 	    wt_status_check_worktree_changes(s, &dirty_submodules)) {
 		status_printf_ln(s, c,
@@ -1187,8 +1174,7 @@ static void wt_longstatus_print_tracking(struct wt_status *s)
 
 	t_begin = getnanotime();
 
-	if (!format_tracking_info(branch, &sb, s->ahead_behind_flags,
-				  !s->commit_template))
+	if (!format_tracking_info(branch, &sb, s->ahead_behind_flags))
 		return;
 
 	if (advice_enabled(ADVICE_STATUS_AHEAD_BEHIND_WARNING) &&
@@ -1221,11 +1207,11 @@ static void wt_longstatus_print_tracking(struct wt_status *s)
 	strbuf_release(&sb);
 }
 
-static int uf_was_slow(struct wt_status *s)
+static int uf_was_slow(uint32_t untracked_in_ms)
 {
 	if (getenv("GIT_TEST_UF_DELAY_WARNING"))
-		s->untracked_in_ms = 3250;
-	return UF_DELAY_WARNING_IN_MS < s->untracked_in_ms;
+		untracked_in_ms += UF_DELAY_WARNING_IN_MS + 1;
+	return UF_DELAY_WARNING_IN_MS < untracked_in_ms;
 }
 
 static void show_merge_in_progress(struct wt_status *s,
@@ -1296,32 +1282,26 @@ static char *read_line_from_git_path(const char *filename)
 static int split_commit_in_progress(struct wt_status *s)
 {
 	int split_in_progress = 0;
-	struct object_id head_oid, orig_head_oid;
-	char *rebase_amend, *rebase_orig_head;
-	int head_flags, orig_head_flags;
+	char *head, *orig_head, *rebase_amend, *rebase_orig_head;
 
 	if ((!s->amend && !s->nowarn && !s->workdir_dirty) ||
 	    !s->branch || strcmp(s->branch, "HEAD"))
 		return 0;
 
-	if (read_ref_full("HEAD", RESOLVE_REF_READING | RESOLVE_REF_NO_RECURSE,
-			  &head_oid, &head_flags) ||
-	    read_ref_full("ORIG_HEAD", RESOLVE_REF_READING | RESOLVE_REF_NO_RECURSE,
-			  &orig_head_oid, &orig_head_flags))
-		return 0;
-	if (head_flags & REF_ISSYMREF || orig_head_flags & REF_ISSYMREF)
-		return 0;
-
+	head = read_line_from_git_path("HEAD");
+	orig_head = read_line_from_git_path("ORIG_HEAD");
 	rebase_amend = read_line_from_git_path("rebase-merge/amend");
 	rebase_orig_head = read_line_from_git_path("rebase-merge/orig-head");
 
-	if (!rebase_amend || !rebase_orig_head)
+	if (!head || !orig_head || !rebase_amend || !rebase_orig_head)
 		; /* fall through, no split in progress */
 	else if (!strcmp(rebase_amend, rebase_orig_head))
-		split_in_progress = !!strcmp(oid_to_hex(&head_oid), rebase_amend);
-	else if (strcmp(oid_to_hex(&orig_head_oid), rebase_orig_head))
+		split_in_progress = !!strcmp(head, rebase_amend);
+	else if (strcmp(orig_head, rebase_orig_head))
 		split_in_progress = 1;
 
+	free(head);
+	free(orig_head);
 	free(rebase_amend);
 	free(rebase_orig_head);
 
@@ -1357,7 +1337,7 @@ static void abbrev_oid_in_line(struct strbuf *line)
 		 * it after abbreviation.
 		 */
 		strbuf_trim(split[1]);
-		if (!repo_get_oid(the_repository, split[1]->buf, &oid)) {
+		if (!get_oid(split[1]->buf, &oid)) {
 			strbuf_reset(split[1]);
 			strbuf_add_unique_abbrev(split[1], &oid,
 						 DEFAULT_ABBREV);
@@ -1523,8 +1503,8 @@ static void show_cherry_pick_in_progress(struct wt_status *s,
 	else
 		status_printf_ln(s, color,
 			_("You are currently cherry-picking commit %s."),
-			repo_find_unique_abbrev(the_repository, &s->state.cherry_pick_head_oid,
-						DEFAULT_ABBREV));
+			find_unique_abbrev(&s->state.cherry_pick_head_oid,
+					   DEFAULT_ABBREV));
 
 	if (s->hints) {
 		if (has_unmerged(s))
@@ -1553,8 +1533,8 @@ static void show_revert_in_progress(struct wt_status *s,
 	else
 		status_printf_ln(s, color,
 			_("You are currently reverting commit %s."),
-			repo_find_unique_abbrev(the_repository, &s->state.revert_head_oid,
-						DEFAULT_ABBREV));
+			find_unique_abbrev(&s->state.revert_head_oid,
+					   DEFAULT_ABBREV));
 	if (s->hints) {
 		if (has_unmerged(s))
 			status_printf_ln(s, color,
@@ -1576,10 +1556,10 @@ static void show_revert_in_progress(struct wt_status *s,
 static void show_bisect_in_progress(struct wt_status *s,
 				    const char *color)
 {
-	if (s->state.bisecting_from)
+	if (s->state.branch)
 		status_printf_ln(s, color,
 				 _("You are currently bisecting, started from branch '%s'."),
-				 s->state.bisecting_from);
+				 s->state.branch);
 	else
 		status_printf_ln(s, color,
 				 _("You are currently bisecting."));
@@ -1684,8 +1664,7 @@ static void wt_status_get_detached_from(struct repository *r,
 		return;
 	}
 
-	if (repo_dwim_ref(r, cb.buf.buf, cb.buf.len, &oid, &ref,
-			  1) == 1 &&
+	if (dwim_ref(cb.buf.buf, cb.buf.len, &oid, &ref, 1) == 1 &&
 	    /* oid is a commit? match without further lookup */
 	    (oideq(&cb.noid, &oid) ||
 	     /* perhaps oid is a tag, try to dereference to a commit */
@@ -1697,9 +1676,9 @@ static void wt_status_get_detached_from(struct repository *r,
 		state->detached_from = xstrdup(from);
 	} else
 		state->detached_from =
-			xstrdup(repo_find_unique_abbrev(r, &cb.noid, DEFAULT_ABBREV));
+			xstrdup(find_unique_abbrev(&cb.noid, DEFAULT_ABBREV));
 	oidcpy(&state->detached_oid, &cb.noid);
-	state->detached_at = !repo_get_oid(r, "HEAD", &oid) &&
+	state->detached_at = !get_oid("HEAD", &oid) &&
 			     oideq(&oid, &state->detached_oid);
 
 	free(ref);
@@ -1740,7 +1719,7 @@ int wt_status_check_bisect(const struct worktree *wt,
 
 	if (!stat(worktree_git_path(wt, "BISECT_LOG"), &st)) {
 		state->bisect_in_progress = 1;
-		state->bisecting_from = get_branch(wt, "BISECT_START");
+		state->branch = get_branch(wt, "BISECT_START");
 		return 1;
 	}
 	return 0;
@@ -1790,21 +1769,21 @@ void wt_status_get_state(struct repository *r,
 	} else if (wt_status_check_rebase(NULL, state)) {
 		;		/* all set */
 	} else if (refs_ref_exists(get_main_ref_store(r), "CHERRY_PICK_HEAD") &&
-		   !repo_get_oid(r, "CHERRY_PICK_HEAD", &oid)) {
+		   !get_oid("CHERRY_PICK_HEAD", &oid)) {
 		state->cherry_pick_in_progress = 1;
 		oidcpy(&state->cherry_pick_head_oid, &oid);
 	}
 	wt_status_check_bisect(NULL, state);
 	if (refs_ref_exists(get_main_ref_store(r), "REVERT_HEAD") &&
-	    !repo_get_oid(r, "REVERT_HEAD", &oid)) {
+	    !get_oid("REVERT_HEAD", &oid)) {
 		state->revert_in_progress = 1;
 		oidcpy(&state->revert_head_oid, &oid);
 	}
 	if (!sequencer_get_last_command(r, &action)) {
-		if (action == REPLAY_PICK && !state->cherry_pick_in_progress) {
+		if (action == REPLAY_PICK) {
 			state->cherry_pick_in_progress = 1;
 			oidcpy(&state->cherry_pick_head_oid, null_oid());
-		} else if (action == REPLAY_REVERT && !state->revert_in_progress) {
+		} else {
 			state->revert_in_progress = 1;
 			oidcpy(&state->revert_head_oid, null_oid());
 		}
@@ -1901,7 +1880,7 @@ static void wt_longstatus_print(struct wt_status *s)
 		wt_longstatus_print_other(s, &s->untracked, _("Untracked files"), "add");
 		if (s->show_ignored_mode)
 			wt_longstatus_print_other(s, &s->ignored, _("Ignored files"), "add -f");
-		if (advice_enabled(ADVICE_STATUS_U_OPTION) && uf_was_slow(s)) {
+		if (advice_enabled(ADVICE_STATUS_U_OPTION) && uf_was_slow(s->untracked_in_ms)) {
 			status_printf_ln(s, GIT_COLOR_NORMAL, "%s", "");
 			if (fsm_mode > FSMONITOR_MODE_DISABLED) {
 				status_printf_ln(s, GIT_COLOR_NORMAL,
@@ -2587,8 +2566,8 @@ int has_unstaged_changes(struct repository *r, int ignore_submodules)
 	}
 	rev_info.diffopt.flags.quick = 1;
 	diff_setup_done(&rev_info.diffopt);
-	run_diff_files(&rev_info, 0);
-	result = diff_result_code(&rev_info.diffopt);
+	result = run_diff_files(&rev_info, 0);
+	result = diff_result_code(&rev_info.diffopt, result);
 	release_revisions(&rev_info);
 	return result;
 }
@@ -2621,8 +2600,8 @@ int has_uncommitted_changes(struct repository *r,
 	}
 
 	diff_setup_done(&rev_info.diffopt);
-	run_diff_index(&rev_info, DIFF_INDEX_CACHED);
-	result = diff_result_code(&rev_info.diffopt);
+	result = run_diff_index(&rev_info, 1);
+	result = diff_result_code(&rev_info.diffopt, result);
 	release_revisions(&rev_info);
 	return result;
 }
@@ -2662,12 +2641,8 @@ int require_clean_work_tree(struct repository *r,
 	}
 
 	if (err) {
-		if (hint) {
-			if (!*hint)
-				BUG("empty hint passed to require_clean_work_tree();"
-				    " use NULL instead");
+		if (hint)
 			error("%s", hint);
-		}
 		if (!gently)
 			exit(128);
 	}

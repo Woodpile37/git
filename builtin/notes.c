@@ -7,17 +7,13 @@
  * and builtin/tag.c by Kristian Høgsberg and Carlos Rica.
  */
 
-#include "builtin.h"
+#include "cache.h"
 #include "config.h"
-#include "editor.h"
-#include "environment.h"
-#include "gettext.h"
-#include "hex.h"
+#include "builtin.h"
 #include "notes.h"
-#include "object-name.h"
-#include "object-store-ll.h"
-#include "path.h"
+#include "object-store.h"
 #include "repository.h"
+#include "blob.h"
 #include "pretty.h"
 #include "refs.h"
 #include "exec-cmd.h"
@@ -27,14 +23,12 @@
 #include "notes-merge.h"
 #include "notes-utils.h"
 #include "worktree.h"
-#include "write-or-die.h"
 
-static const char *separator = "\n";
 static const char * const git_notes_usage[] = {
 	N_("git notes [--ref <notes-ref>] [list [<object>]]"),
-	N_("git notes [--ref <notes-ref>] add [-f] [--allow-empty] [--[no-]separator|--separator=<paragraph-break>] [--[no-]stripspace] [-m <msg> | -F <file> | (-c | -C) <object>] [<object>]"),
+	N_("git notes [--ref <notes-ref>] add [-f] [--allow-empty] [-m <msg> | -F <file> | (-c | -C) <object>] [<object>]"),
 	N_("git notes [--ref <notes-ref>] copy [-f] <from-object> <to-object>"),
-	N_("git notes [--ref <notes-ref>] append [--allow-empty] [--[no-]separator|--separator=<paragraph-break>] [--[no-]stripspace] [-m <msg> | -F <file> | (-c | -C) <object>] [<object>]"),
+	N_("git notes [--ref <notes-ref>] append [--allow-empty] [-m <msg> | -F <file> | (-c | -C) <object>] [<object>]"),
 	N_("git notes [--ref <notes-ref>] edit [--allow-empty] [<object>]"),
 	N_("git notes [--ref <notes-ref>] show [<object>]"),
 	N_("git notes [--ref <notes-ref>] merge [-v | -q] [-s <strategy>] <notes-ref>"),
@@ -102,26 +96,11 @@ static const char * const git_notes_get_ref_usage[] = {
 static const char note_template[] =
 	N_("Write/edit the notes for the following object:");
 
-enum notes_stripspace {
-	UNSPECIFIED = -1,
-	NO_STRIPSPACE = 0,
-	STRIPSPACE = 1,
-};
-
-struct note_msg {
-	enum notes_stripspace stripspace;
-	struct strbuf buf;
-};
-
 struct note_data {
 	int given;
 	int use_editor;
-	int stripspace;
 	char *edit_path;
 	struct strbuf buf;
-	struct note_msg **messages;
-	size_t msg_nr;
-	size_t msg_alloc;
 };
 
 static void free_note_data(struct note_data *d)
@@ -131,18 +110,11 @@ static void free_note_data(struct note_data *d)
 		free(d->edit_path);
 	}
 	strbuf_release(&d->buf);
-
-	while (d->msg_nr--) {
-		strbuf_release(&d->messages[d->msg_nr]->buf);
-		free(d->messages[d->msg_nr]);
-	}
-	free(d->messages);
 }
 
 static int list_each_note(const struct object_id *object_oid,
-			  const struct object_id *note_oid,
-			  char *note_path UNUSED,
-			  void *cb_data UNUSED)
+		const struct object_id *note_oid, char *note_path,
+		void *cb_data)
 {
 	printf("%s %s\n", oid_to_hex(note_oid), oid_to_hex(object_oid));
 	return 0;
@@ -152,7 +124,7 @@ static void copy_obj_to_fd(int fd, const struct object_id *oid)
 {
 	unsigned long size;
 	enum object_type type;
-	char *buf = repo_read_object_file(the_repository, oid, &type, &size);
+	char *buf = read_object_file(oid, &type, &size);
 	if (buf) {
 		if (size)
 			write_or_die(fd, buf, size);
@@ -179,7 +151,7 @@ static void write_commented_object(int fd, const struct object_id *object)
 
 	if (strbuf_read(&buf, show.out, 0) < 0)
 		die_errno(_("could not read 'show' output"));
-	strbuf_add_commented_lines(&cbuf, buf.buf, buf.len, comment_line_char);
+	strbuf_add_commented_lines(&cbuf, buf.buf, buf.len);
 	write_or_die(fd, cbuf.buf, cbuf.len);
 
 	strbuf_release(&cbuf);
@@ -207,10 +179,9 @@ static void prepare_note_data(const struct object_id *object, struct note_data *
 			copy_obj_to_fd(fd, old_note);
 
 		strbuf_addch(&buf, '\n');
-		strbuf_add_commented_lines(&buf, "\n", strlen("\n"), comment_line_char);
-		strbuf_add_commented_lines(&buf, _(note_template), strlen(_(note_template)),
-					   comment_line_char);
-		strbuf_add_commented_lines(&buf, "\n", strlen("\n"), comment_line_char);
+		strbuf_add_commented_lines(&buf, "\n", strlen("\n"));
+		strbuf_add_commented_lines(&buf, _(note_template), strlen(_(note_template)));
+		strbuf_add_commented_lines(&buf, "\n", strlen("\n"));
 		write_or_die(fd, buf.buf, buf.len);
 
 		write_commented_object(fd, object);
@@ -222,8 +193,7 @@ static void prepare_note_data(const struct object_id *object, struct note_data *
 		if (launch_editor(d->edit_path, &d->buf, NULL)) {
 			die(_("please supply the note contents using either -m or -F option"));
 		}
-		if (d->stripspace)
-			strbuf_stripspace(&d->buf, comment_line_char);
+		strbuf_stripspace(&d->buf, 1);
 	}
 }
 
@@ -239,102 +209,66 @@ static void write_note_data(struct note_data *d, struct object_id *oid)
 	}
 }
 
-static void append_separator(struct strbuf *message)
-{
-	size_t sep_len = 0;
-
-	if (!separator)
-		return;
-	else if ((sep_len = strlen(separator)) && separator[sep_len - 1] == '\n')
-		strbuf_addstr(message, separator);
-	else
-		strbuf_addf(message, "%s%s", separator, "\n");
-}
-
-static void concat_messages(struct note_data *d)
-{
-	struct strbuf msg = STRBUF_INIT;
-	size_t i;
-
-	for (i = 0; i < d->msg_nr ; i++) {
-		if (d->buf.len)
-			append_separator(&d->buf);
-		strbuf_add(&msg, d->messages[i]->buf.buf, d->messages[i]->buf.len);
-		strbuf_addbuf(&d->buf, &msg);
-		if ((d->stripspace == UNSPECIFIED &&
-		     d->messages[i]->stripspace == STRIPSPACE) ||
-		    d->stripspace == STRIPSPACE)
-			strbuf_stripspace(&d->buf, 0);
-		strbuf_reset(&msg);
-	}
-	strbuf_release(&msg);
-}
-
 static int parse_msg_arg(const struct option *opt, const char *arg, int unset)
 {
 	struct note_data *d = opt->value;
-	struct note_msg *msg = xmalloc(sizeof(*msg));
 
 	BUG_ON_OPT_NEG(unset);
 
-	strbuf_init(&msg->buf, strlen(arg));
-	strbuf_addstr(&msg->buf, arg);
-	ALLOC_GROW_BY(d->messages, d->msg_nr, 1, d->msg_alloc);
-	d->messages[d->msg_nr - 1] = msg;
-	msg->stripspace = STRIPSPACE;
+	strbuf_grow(&d->buf, strlen(arg) + 2);
+	if (d->buf.len)
+		strbuf_addch(&d->buf, '\n');
+	strbuf_addstr(&d->buf, arg);
+	strbuf_stripspace(&d->buf, 0);
+
+	d->given = 1;
 	return 0;
 }
 
 static int parse_file_arg(const struct option *opt, const char *arg, int unset)
 {
 	struct note_data *d = opt->value;
-	struct note_msg *msg = xmalloc(sizeof(*msg));
 
 	BUG_ON_OPT_NEG(unset);
 
-	strbuf_init(&msg->buf , 0);
+	if (d->buf.len)
+		strbuf_addch(&d->buf, '\n');
 	if (!strcmp(arg, "-")) {
-		if (strbuf_read(&msg->buf, 0, 1024) < 0)
+		if (strbuf_read(&d->buf, 0, 1024) < 0)
 			die_errno(_("cannot read '%s'"), arg);
-	} else if (strbuf_read_file(&msg->buf, arg, 1024) < 0)
+	} else if (strbuf_read_file(&d->buf, arg, 1024) < 0)
 		die_errno(_("could not open or read '%s'"), arg);
+	strbuf_stripspace(&d->buf, 0);
 
-	ALLOC_GROW_BY(d->messages, d->msg_nr, 1, d->msg_alloc);
-	d->messages[d->msg_nr - 1] = msg;
-	msg->stripspace = STRIPSPACE;
+	d->given = 1;
 	return 0;
 }
 
 static int parse_reuse_arg(const struct option *opt, const char *arg, int unset)
 {
 	struct note_data *d = opt->value;
-	struct note_msg *msg = xmalloc(sizeof(*msg));
-	char *value;
+	char *buf;
 	struct object_id object;
 	enum object_type type;
 	unsigned long len;
 
 	BUG_ON_OPT_NEG(unset);
 
-	strbuf_init(&msg->buf, 0);
-	if (repo_get_oid(the_repository, arg, &object))
+	if (d->buf.len)
+		strbuf_addch(&d->buf, '\n');
+
+	if (get_oid(arg, &object))
 		die(_("failed to resolve '%s' as a valid ref."), arg);
-	if (!(value = repo_read_object_file(the_repository, &object, &type, &len)))
+	if (!(buf = read_object_file(&object, &type, &len)))
 		die(_("failed to read object '%s'."), arg);
 	if (type != OBJ_BLOB) {
-		strbuf_release(&msg->buf);
-		free(value);
-		free(msg);
+		free(buf);
 		die(_("cannot read note data from non-blob object '%s'."), arg);
 	}
+	strbuf_add(&d->buf, buf, len);
+	free(buf);
 
-	strbuf_add(&msg->buf, value, len);
-	free(value);
-
-	msg->buf.len = len;
-	ALLOC_GROW_BY(d->messages, d->msg_nr, 1, d->msg_alloc);
-	d->messages[d->msg_nr - 1] = msg;
-	msg->stripspace = NO_STRIPSPACE;
+	d->given = 1;
 	return 0;
 }
 
@@ -344,16 +278,6 @@ static int parse_reedit_arg(const struct option *opt, const char *arg, int unset
 	BUG_ON_OPT_NEG(unset);
 	d->use_editor = 1;
 	return parse_reuse_arg(opt, arg, unset);
-}
-
-static int parse_separator_arg(const struct option *opt, const char *arg,
-			       int unset)
-{
-	if (unset)
-		*(const char **)opt->value = NULL;
-	else
-		*(const char **)opt->value = arg ? arg : "\n";
-	return 0;
 }
 
 static int notes_copy_from_stdin(int force, const char *rewrite_cmd)
@@ -383,9 +307,9 @@ static int notes_copy_from_stdin(int force, const char *rewrite_cmd)
 			die(_("malformed input line: '%s'."), buf.buf);
 		strbuf_rtrim(split[0]);
 		strbuf_rtrim(split[1]);
-		if (repo_get_oid(the_repository, split[0]->buf, &from_obj))
+		if (get_oid(split[0]->buf, &from_obj))
 			die(_("failed to resolve '%s' as a valid ref."), split[0]->buf);
-		if (repo_get_oid(the_repository, split[1]->buf, &to_obj))
+		if (get_oid(split[1]->buf, &to_obj))
 			die(_("failed to resolve '%s' as a valid ref."), split[1]->buf);
 
 		if (rewrite_cmd)
@@ -453,7 +377,7 @@ static int list(int argc, const char **argv, const char *prefix)
 
 	t = init_notes_check("list", 0);
 	if (argc) {
-		if (repo_get_oid(the_repository, argv[0], &object))
+		if (get_oid(argv[0], &object))
 			die(_("failed to resolve '%s' as a valid ref."), argv[0]);
 		note = get_note(t, &object);
 		if (note) {
@@ -478,8 +402,7 @@ static int add(int argc, const char **argv, const char *prefix)
 	struct notes_tree *t;
 	struct object_id object, new_note;
 	const struct object_id *note;
-	struct note_data d = { .buf = STRBUF_INIT, .stripspace = UNSPECIFIED };
-
+	struct note_data d = { 0, 0, NULL, STRBUF_INIT };
 	struct option options[] = {
 		OPT_CALLBACK_F('m', "message", &d, N_("message"),
 			N_("note contents as a string"), PARSE_OPT_NONEG,
@@ -496,12 +419,6 @@ static int add(int argc, const char **argv, const char *prefix)
 		OPT_BOOL(0, "allow-empty", &allow_empty,
 			N_("allow storing empty note")),
 		OPT__FORCE(&force, N_("replace existing notes"), PARSE_OPT_NOCOMPLETE),
-		OPT_CALLBACK_F(0, "separator", &separator,
-			N_("<paragraph-break>"),
-			N_("insert <paragraph-break> between paragraphs"),
-			PARSE_OPT_OPTARG, parse_separator_arg),
-		OPT_BOOL(0, "stripspace", &d.stripspace,
-			N_("remove unnecessary whitespace")),
 		OPT_END()
 	};
 
@@ -513,13 +430,9 @@ static int add(int argc, const char **argv, const char *prefix)
 		usage_with_options(git_notes_add_usage, options);
 	}
 
-	if (d.msg_nr)
-		concat_messages(&d);
-	d.given = !!d.buf.len;
-
 	object_ref = argc > 1 ? argv[1] : "HEAD";
 
-	if (repo_get_oid(the_repository, object_ref, &object))
+	if (get_oid(object_ref, &object))
 		die(_("failed to resolve '%s' as a valid ref."), object_ref);
 
 	t = init_notes_check("add", NOTES_INIT_WRITABLE);
@@ -607,12 +520,12 @@ static int copy(int argc, const char **argv, const char *prefix)
 		usage_with_options(git_notes_copy_usage, options);
 	}
 
-	if (repo_get_oid(the_repository, argv[0], &from_obj))
+	if (get_oid(argv[0], &from_obj))
 		die(_("failed to resolve '%s' as a valid ref."), argv[0]);
 
 	object_ref = 1 < argc ? argv[1] : "HEAD";
 
-	if (repo_get_oid(the_repository, object_ref, &object))
+	if (get_oid(object_ref, &object))
 		die(_("failed to resolve '%s' as a valid ref."), object_ref);
 
 	t = init_notes_check("copy", NOTES_INIT_WRITABLE);
@@ -649,13 +562,14 @@ out:
 static int append_edit(int argc, const char **argv, const char *prefix)
 {
 	int allow_empty = 0;
+	int blankline = 1;
 	const char *object_ref;
 	struct notes_tree *t;
 	struct object_id object, new_note;
 	const struct object_id *note;
-	char *logmsg;
+	char *logmsg = NULL;
 	const char * const *usage;
-	struct note_data d = { .buf = STRBUF_INIT, .stripspace = UNSPECIFIED };
+	struct note_data d = { .buf = STRBUF_INIT };
 	struct option options[] = {
 		OPT_CALLBACK_F('m', "message", &d, N_("message"),
 			N_("note contents as a string"), PARSE_OPT_NONEG,
@@ -671,12 +585,8 @@ static int append_edit(int argc, const char **argv, const char *prefix)
 			parse_reuse_arg),
 		OPT_BOOL(0, "allow-empty", &allow_empty,
 			N_("allow storing empty note")),
-		OPT_CALLBACK_F(0, "separator", &separator,
-			N_("<paragraph-break>"),
-			N_("insert <paragraph-break> between paragraphs"),
-			PARSE_OPT_OPTARG, parse_separator_arg),
-		OPT_BOOL(0, "stripspace", &d.stripspace,
-			N_("remove unnecessary whitespace")),
+		OPT_BOOL(0, "blank-line", &blankline,
+			N_("insert paragraph break before appending to an existing note")),
 		OPT_END()
 	};
 	int edit = !strcmp(argv[0], "edit");
@@ -690,10 +600,6 @@ static int append_edit(int argc, const char **argv, const char *prefix)
 		usage_with_options(usage, options);
 	}
 
-	if (d.msg_nr)
-		concat_messages(&d);
-	d.given = !!d.buf.len;
-
 	if (d.given && edit)
 		fprintf(stderr, _("The -m/-F/-c/-C options have been deprecated "
 			"for the 'edit' subcommand.\n"
@@ -701,7 +607,7 @@ static int append_edit(int argc, const char **argv, const char *prefix)
 
 	object_ref = 1 < argc ? argv[1] : "HEAD";
 
-	if (repo_get_oid(the_repository, object_ref, &object))
+	if (get_oid(object_ref, &object))
 		die(_("failed to resolve '%s' as a valid ref."), object_ref);
 
 	t = init_notes_check(argv[0], NOTES_INIT_WRITABLE);
@@ -713,17 +619,13 @@ static int append_edit(int argc, const char **argv, const char *prefix)
 		/* Append buf to previous note contents */
 		unsigned long size;
 		enum object_type type;
-		struct strbuf buf = STRBUF_INIT;
-		char *prev_buf = repo_read_object_file(the_repository, note, &type, &size);
+		char *prev_buf = read_object_file(note, &type, &size);
 
+		if (blankline && d.buf.len && prev_buf && size)
+			strbuf_insertstr(&d.buf, 0, "\n");
 		if (prev_buf && size)
-			strbuf_add(&buf, prev_buf, size);
-		if (d.buf.len && prev_buf && size)
-			append_separator(&buf);
-		strbuf_insert(&d.buf, 0, buf.buf, buf.len);
-
+			strbuf_insert(&d.buf, 0, prev_buf, size);
 		free(prev_buf);
-		strbuf_release(&buf);
 	}
 
 	if (d.buf.len || allow_empty) {
@@ -731,13 +633,11 @@ static int append_edit(int argc, const char **argv, const char *prefix)
 		if (add_note(t, &object, &new_note, combine_notes_overwrite))
 			BUG("combine_notes_overwrite failed");
 		logmsg = xstrfmt("Notes added by 'git notes %s'", argv[0]);
-	} else {
-		fprintf(stderr, _("Removing note for object %s\n"),
+		commit_notes(the_repository, t, logmsg);
+	} else if (!d.buf.len && !note)
+		fprintf(stderr,
+			_("Both original and appended notes are empty in %s, do nothing\n"),
 			oid_to_hex(&object));
-		remove_note(t, object.hash);
-		logmsg = xstrfmt("Notes removed by 'git notes %s'", argv[0]);
-	}
-	commit_notes(the_repository, t, logmsg);
 
 	free(logmsg);
 	free_note_data(&d);
@@ -766,7 +666,7 @@ static int show(int argc, const char **argv, const char *prefix)
 
 	object_ref = argc ? argv[0] : "HEAD";
 
-	if (repo_get_oid(the_repository, object_ref, &object))
+	if (get_oid(object_ref, &object))
 		die(_("failed to resolve '%s' as a valid ref."), object_ref);
 
 	t = init_notes_check("show", 0);
@@ -816,11 +716,11 @@ static int merge_commit(struct notes_merge_options *o)
 	 * and target notes ref from .git/NOTES_MERGE_REF.
 	 */
 
-	if (repo_get_oid(the_repository, "NOTES_MERGE_PARTIAL", &oid))
+	if (get_oid("NOTES_MERGE_PARTIAL", &oid))
 		die(_("failed to read ref NOTES_MERGE_PARTIAL"));
 	else if (!(partial = lookup_commit_reference(the_repository, &oid)))
 		die(_("could not find commit from NOTES_MERGE_PARTIAL."));
-	else if (repo_parse_commit(the_repository, partial))
+	else if (parse_commit(partial))
 		die(_("could not parse commit from NOTES_MERGE_PARTIAL."));
 
 	if (partial->parents)
@@ -841,8 +741,7 @@ static int merge_commit(struct notes_merge_options *o)
 
 	/* Reuse existing commit message in reflog message */
 	memset(&pretty_ctx, 0, sizeof(pretty_ctx));
-	repo_format_commit_message(the_repository, partial, "%s", &msg,
-				   &pretty_ctx);
+	format_commit_message(partial, "%s", &msg, &pretty_ctx);
 	strbuf_trim(&msg);
 	strbuf_insertstr(&msg, 0, "notes: ");
 	update_ref(msg.buf, o->local_ref, &oid,
@@ -996,7 +895,7 @@ static int remove_one_note(struct notes_tree *t, const char *name, unsigned flag
 {
 	int status;
 	struct object_id oid;
-	if (repo_get_oid(the_repository, name, &oid))
+	if (get_oid(name, &oid))
 		return error(_("Failed to resolve '%s' as a valid ref."), name);
 	status = remove_note(t, oid.hash);
 	if (status)

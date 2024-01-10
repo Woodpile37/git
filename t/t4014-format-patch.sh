@@ -59,10 +59,6 @@ test_expect_success setup '
 	test_tick &&
 	git commit -m "patchid 3" &&
 
-	git checkout -b empty main &&
-	test_tick &&
-	git commit --allow-empty -m "empty commit" &&
-
 	git checkout main
 '
 
@@ -130,12 +126,6 @@ test_expect_success 'format-patch did not screw up the log message' '
 test_expect_success 'replay did not screw up the log message' '
 	git cat-file commit rebuild-1 >actual &&
 	grep "^Side .* with .* backslash-n" actual
-'
-
-test_expect_success 'format-patch empty commit' '
-	git format-patch --stdout main..empty >empty &&
-	grep "^From " empty >from &&
-	test_line_count = 1 from
 '
 
 test_expect_success 'extra headers' '
@@ -455,13 +445,13 @@ test_expect_success 'no threading' '
 
 cat >expect.thread <<EOF
 ---
-Message-ID: <0>
+Message-Id: <0>
 ---
-Message-ID: <1>
+Message-Id: <1>
 In-Reply-To: <0>
 References: <0>
 ---
-Message-ID: <2>
+Message-Id: <2>
 In-Reply-To: <0>
 References: <0>
 EOF
@@ -470,22 +460,17 @@ test_expect_success 'thread' '
 	check_threading expect.thread --thread main
 '
 
-test_expect_success '--thread overrides format.thread=deep' '
-	test_config format.thread deep &&
-	check_threading expect.thread --thread main
-'
-
 cat >expect.in-reply-to <<EOF
 ---
-Message-ID: <0>
+Message-Id: <0>
 In-Reply-To: <1>
 References: <1>
 ---
-Message-ID: <2>
+Message-Id: <2>
 In-Reply-To: <1>
 References: <1>
 ---
-Message-ID: <3>
+Message-Id: <3>
 In-Reply-To: <1>
 References: <1>
 EOF
@@ -497,17 +482,17 @@ test_expect_success 'thread in-reply-to' '
 
 cat >expect.cover-letter <<EOF
 ---
-Message-ID: <0>
+Message-Id: <0>
 ---
-Message-ID: <1>
+Message-Id: <1>
 In-Reply-To: <0>
 References: <0>
 ---
-Message-ID: <2>
+Message-Id: <2>
 In-Reply-To: <0>
 References: <0>
 ---
-Message-ID: <3>
+Message-Id: <3>
 In-Reply-To: <0>
 References: <0>
 EOF
@@ -518,21 +503,21 @@ test_expect_success 'thread cover-letter' '
 
 cat >expect.cl-irt <<EOF
 ---
-Message-ID: <0>
+Message-Id: <0>
 In-Reply-To: <1>
 References: <1>
 ---
-Message-ID: <2>
+Message-Id: <2>
 In-Reply-To: <0>
 References: <1>
 	<0>
 ---
-Message-ID: <3>
+Message-Id: <3>
 In-Reply-To: <0>
 References: <1>
 	<0>
 ---
-Message-ID: <4>
+Message-Id: <4>
 In-Reply-To: <0>
 References: <1>
 	<0>
@@ -550,13 +535,13 @@ test_expect_success 'thread explicit shallow' '
 
 cat >expect.deep <<EOF
 ---
-Message-ID: <0>
+Message-Id: <0>
 ---
-Message-ID: <1>
+Message-Id: <1>
 In-Reply-To: <0>
 References: <0>
 ---
-Message-ID: <2>
+Message-Id: <2>
 In-Reply-To: <1>
 References: <0>
 	<1>
@@ -568,16 +553,16 @@ test_expect_success 'thread deep' '
 
 cat >expect.deep-irt <<EOF
 ---
-Message-ID: <0>
+Message-Id: <0>
 In-Reply-To: <1>
 References: <1>
 ---
-Message-ID: <2>
+Message-Id: <2>
 In-Reply-To: <0>
 References: <1>
 	<0>
 ---
-Message-ID: <3>
+Message-Id: <3>
 In-Reply-To: <2>
 References: <1>
 	<0>
@@ -591,18 +576,18 @@ test_expect_success 'thread deep in-reply-to' '
 
 cat >expect.deep-cl <<EOF
 ---
-Message-ID: <0>
+Message-Id: <0>
 ---
-Message-ID: <1>
+Message-Id: <1>
 In-Reply-To: <0>
 References: <0>
 ---
-Message-ID: <2>
+Message-Id: <2>
 In-Reply-To: <1>
 References: <0>
 	<1>
 ---
-Message-ID: <3>
+Message-Id: <3>
 In-Reply-To: <2>
 References: <0>
 	<1>
@@ -615,22 +600,22 @@ test_expect_success 'thread deep cover-letter' '
 
 cat >expect.deep-cl-irt <<EOF
 ---
-Message-ID: <0>
+Message-Id: <0>
 In-Reply-To: <1>
 References: <1>
 ---
-Message-ID: <2>
+Message-Id: <2>
 In-Reply-To: <0>
 References: <1>
 	<0>
 ---
-Message-ID: <3>
+Message-Id: <3>
 In-Reply-To: <2>
 References: <1>
 	<0>
 	<2>
 ---
-Message-ID: <4>
+Message-Id: <4>
 In-Reply-To: <3>
 References: <1>
 	<0>
@@ -1373,27 +1358,7 @@ test_expect_success '--rfc' '
 	Subject: [RFC PATCH 1/1] header with . in it
 	EOF
 	git format-patch -n -1 --stdout --rfc >patch &&
-	grep "^Subject:" patch >actual &&
-	test_cmp expect actual
-'
-
-test_expect_success '--rfc does not overwrite prefix' '
-	cat >expect <<-\EOF &&
-	Subject: [RFC PATCH foobar 1/1] header with . in it
-	EOF
-	git -c format.subjectPrefix="PATCH foobar" \
-		format-patch -n -1 --stdout --rfc >patch &&
-	grep "^Subject:" patch >actual &&
-	test_cmp expect actual
-'
-
-test_expect_success '--rfc is argument order independent' '
-	cat >expect <<-\EOF &&
-	Subject: [RFC PATCH foobar 1/1] header with . in it
-	EOF
-	git format-patch -n -1 --stdout --rfc \
-		--subject-prefix="PATCH foobar" >patch &&
-	grep "^Subject:" patch >actual &&
+	grep ^Subject: patch >actual &&
 	test_cmp expect actual
 '
 
@@ -1906,16 +1871,6 @@ body" &&
 	grep "^body$" actual
 '
 
-test_expect_success 'cover letter with --cover-from-description subject (UTF-8 subject line)' '
-	test_config branch.rebuild-1.description "Café?
-
-body" &&
-	git checkout rebuild-1 &&
-	git format-patch --stdout --cover-letter --cover-from-description subject --encode-email-headers main >actual &&
-	grep "^Subject: \[PATCH 0/2\] =?UTF-8?q?Caf=C3=A9=3F?=$" actual &&
-	! grep "Café" actual
-'
-
 test_expect_success 'cover letter with format.coverFromDescription = auto (short subject line)' '
 	test_config branch.rebuild-1.description "config subject
 
@@ -2019,20 +1974,6 @@ test_expect_success 'cover letter using branch description (6)' '
 	test_config branch.rebuild-1.description hello &&
 	git format-patch --stdout --cover-letter -2 >actual &&
 	grep hello actual
-'
-
-test_expect_success 'cover letter with --description-file' '
-	test_when_finished "rm -f description.txt" &&
-	cat >description.txt <<-\EOF &&
-	subject from file
-
-	body from file
-	EOF
-	git checkout rebuild-1 &&
-	git format-patch --stdout --cover-letter --cover-from-description auto \
-		--description-file description.txt main >actual &&
-	grep "^Subject: \[PATCH 0/2\] subject from file$" actual &&
-	grep "^body from file$" actual
 '
 
 test_expect_success 'cover letter with nothing' '
@@ -2340,25 +2281,7 @@ test_expect_success 'format-patch --attach cover-letter only is non-multipart' '
 	test_line_count = 1 output
 '
 
-test_expect_success 'format-patch with format.attach' '
-	test_when_finished "rm -fr patches" &&
-	separator=attachment-separator &&
-	test_config format.attach "$separator" &&
-	filename=$(git format-patch -o patches -1) &&
-	grep "^Content-Type: multipart/.*$separator" "$filename"
-'
-
-test_expect_success 'format-patch with format.attach=disabled' '
-	test_when_finished "rm -fr patches" &&
-	separator=attachment-separator &&
-	test_config_global format.attach "$separator" &&
-	test_config format.attach "" &&
-	filename=$(git format-patch -o patches -1) &&
-	# The output should not even declare content type for text/plain.
-	! grep "^Content-Type: multipart/" "$filename"
-'
-
-test_expect_success '-c format.mboxrd format-patch' '
+test_expect_success 'format-patch --mboxrd' '
 	sp=" " &&
 	cat >msg <<-INPUT_END &&
 	mboxrd should escape the body
@@ -2393,7 +2316,7 @@ test_expect_success '-c format.mboxrd format-patch' '
 	INPUT_END
 
 	C=$(git commit-tree HEAD^^{tree} -p HEAD <msg) &&
-	git -c format.mboxrd format-patch --stdout -1 $C~1..$C >patch &&
+	git format-patch --mboxrd --stdout -1 $C~1..$C >patch &&
 	git format-patch --pretty=mboxrd --stdout -1 $C~1..$C >compat &&
 	test_cmp patch compat &&
 	git grep -h --no-index -A11 \
@@ -2413,25 +2336,25 @@ test_expect_success 'interdiff: cover-letter' '
 	--q
 	EOF
 	git format-patch --cover-letter --interdiff=boop~2 -1 boop &&
-	test_grep "^Interdiff:$" 0000-cover-letter.patch &&
-	test_grep ! "^Interdiff:$" 0001-fleep.patch &&
+	test_i18ngrep "^Interdiff:$" 0000-cover-letter.patch &&
+	test_i18ngrep ! "^Interdiff:$" 0001-fleep.patch &&
 	sed "1,/^@@ /d; /^-- $/q" 0000-cover-letter.patch >actual &&
 	test_cmp expect actual
 '
 
 test_expect_success 'interdiff: reroll-count' '
 	git format-patch --cover-letter --interdiff=boop~2 -v2 -1 boop &&
-	test_grep "^Interdiff ..* v1:$" v2-0000-cover-letter.patch
+	test_i18ngrep "^Interdiff ..* v1:$" v2-0000-cover-letter.patch
 '
 
 test_expect_success 'interdiff: reroll-count with a non-integer' '
 	git format-patch --cover-letter --interdiff=boop~2 -v2.2 -1 boop &&
-	test_grep "^Interdiff:$" v2.2-0000-cover-letter.patch
+	test_i18ngrep "^Interdiff:$" v2.2-0000-cover-letter.patch
 '
 
 test_expect_success 'interdiff: reroll-count with a integer' '
 	git format-patch --cover-letter --interdiff=boop~2 -v2 -1 boop &&
-	test_grep "^Interdiff ..* v1:$" v2-0000-cover-letter.patch
+	test_i18ngrep "^Interdiff ..* v1:$" v2-0000-cover-letter.patch
 '
 
 test_expect_success 'interdiff: solo-patch' '
@@ -2440,25 +2363,9 @@ test_expect_success 'interdiff: solo-patch' '
 
 	EOF
 	git format-patch --interdiff=boop~2 -1 boop &&
-	test_grep "^Interdiff:$" 0001-fleep.patch &&
+	test_i18ngrep "^Interdiff:$" 0001-fleep.patch &&
 	sed "1,/^  @@ /d; /^$/q" 0001-fleep.patch >actual &&
 	test_cmp expect actual
-'
-
-test_expect_success 'format-patch does not respect diff.noprefix' '
-	git -c diff.noprefix format-patch -1 --stdout >actual &&
-	grep "^--- a/blorp" actual
-'
-
-test_expect_success 'format-patch respects format.noprefix' '
-	git -c format.noprefix format-patch -1 --stdout >actual &&
-	grep "^--- blorp" actual
-'
-
-test_expect_success 'format-patch --default-prefix overrides format.noprefix' '
-	git -c format.noprefix \
-		format-patch -1 --default-prefix --stdout >actual &&
-	grep "^--- a/blorp" actual
 '
 
 test_done
