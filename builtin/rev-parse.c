@@ -6,7 +6,6 @@
 #define USE_THE_INDEX_VARIABLE
 #include "builtin.h"
 #include "abspath.h"
-#include "alloc.h"
 #include "config.h"
 #include "commit.h"
 #include "environment.h"
@@ -26,6 +25,7 @@
 #include "submodule.h"
 #include "commit-reach.h"
 #include "shallow.h"
+#include "object-file-convert.h"
 
 #define DO_REVS		1
 #define DO_NOREV	2
@@ -226,7 +226,7 @@ static int anti_reference(const char *refname, const struct object_id *oid,
 	return 0;
 }
 
-static int show_abbrev(const struct object_id *oid, void *cb_data)
+static int show_abbrev(const struct object_id *oid, void *cb_data UNUSED)
 {
 	show_rev(NORMAL, oid, NULL);
 	return 0;
@@ -676,6 +676,8 @@ static void print_path(const char *path, const char *prefix, enum format_type fo
 int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 {
 	int i, as_is = 0, verify = 0, quiet = 0, revs_count = 0, type = 0;
+	const struct git_hash_algo *output_algo = NULL;
+	const struct git_hash_algo *compat = NULL;
 	int did_repo_setup = 0;
 	int has_dashdash = 0;
 	int output_prefix = 0;
@@ -747,6 +749,7 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 
 			prepare_repo_settings(the_repository);
 			the_repository->settings.command_requires_full_index = 0;
+			compat = the_repository->compat_hash_algo;
 		}
 
 		if (!strcmp(arg, "--")) {
@@ -834,6 +837,22 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 				flags |= GET_OID_QUIETLY;
 				continue;
 			}
+			if (opt_with_value(arg, "--output-object-format", &arg)) {
+				if (!arg)
+					die(_("no object format specified"));
+				if (!strcmp(arg, the_hash_algo->name) ||
+				    !strcmp(arg, "storage")) {
+					flags |= GET_OID_HASH_ANY;
+					output_algo = the_hash_algo;
+					continue;
+				}
+				else if (compat && !strcmp(arg, compat->name)) {
+					flags |= GET_OID_HASH_ANY;
+					output_algo = compat;
+					continue;
+				}
+				else die(_("unsupported object format: %s"), arg);
+			}
 			if (opt_with_value(arg, "--short", &arg)) {
 				filter &= ~(DO_FLAGS|DO_NOREV);
 				verify = 1;
@@ -883,7 +902,7 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 				continue;
 			}
 			if (skip_prefix(arg, "--disambiguate=", &arg)) {
-				repo_for_each_abbrev(the_repository, arg,
+				repo_for_each_abbrev(the_repository, arg, the_hash_algo,
 						     show_abbrev, NULL);
 				continue;
 			}
@@ -894,13 +913,15 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 			}
 			if (opt_with_value(arg, "--branches", &arg)) {
 				if (ref_excludes.hidden_refs_configured)
-					return error(_("--exclude-hidden cannot be used together with --branches"));
+					return error(_("options '%s' and '%s' cannot be used together"),
+						     "--exclude-hidden", "--branches");
 				handle_ref_opt(arg, "refs/heads/");
 				continue;
 			}
 			if (opt_with_value(arg, "--tags", &arg)) {
 				if (ref_excludes.hidden_refs_configured)
-					return error(_("--exclude-hidden cannot be used together with --tags"));
+					return error(_("options '%s' and '%s' cannot be used together"),
+						     "--exclude-hidden", "--tags");
 				handle_ref_opt(arg, "refs/tags/");
 				continue;
 			}
@@ -910,7 +931,8 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 			}
 			if (opt_with_value(arg, "--remotes", &arg)) {
 				if (ref_excludes.hidden_refs_configured)
-					return error(_("--exclude-hidden cannot be used together with --remotes"));
+					return error(_("options '%s' and '%s' cannot be used together"),
+						     "--exclude-hidden", "--remotes");
 				handle_ref_opt(arg, "refs/remotes/");
 				continue;
 			}
@@ -1060,6 +1082,10 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 				puts(the_hash_algo->name);
 				continue;
 			}
+			if (!strcmp(arg, "--show-ref-format")) {
+				puts(ref_storage_format_to_name(the_repository->ref_storage_format));
+				continue;
+			}
 			if (!strcmp(arg, "--end-of-options")) {
 				seen_end_of_options = 1;
 				if (filter & (DO_FLAGS | DO_REVS))
@@ -1084,6 +1110,9 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 		}
 		if (!get_oid_with_context(the_repository, name,
 					  flags, &oid, &unused)) {
+			if (output_algo)
+				repo_oid_to_algop(the_repository, &oid,
+						  output_algo, &oid);
 			if (verify)
 				revs_count++;
 			else

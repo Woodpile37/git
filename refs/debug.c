@@ -33,10 +33,10 @@ struct ref_store *maybe_debug_wrap_ref_store(const char *gitdir, struct ref_stor
 	return (struct ref_store *)res;
 }
 
-static int debug_init_db(struct ref_store *refs, struct strbuf *err)
+static int debug_init_db(struct ref_store *refs, int flags, struct strbuf *err)
 {
 	struct debug_ref_store *drefs = (struct debug_ref_store *)refs;
-	int res = drefs->refs->be->init_db(drefs->refs, err);
+	int res = drefs->refs->be->init_db(drefs->refs, flags, err);
 	trace_printf_key(&trace_refs, "init_db: %d\n", res);
 	return res;
 }
@@ -143,20 +143,6 @@ static int debug_create_symref(struct ref_store *ref_store,
 	return res;
 }
 
-static int debug_delete_refs(struct ref_store *ref_store, const char *msg,
-			     struct string_list *refnames, unsigned int flags)
-{
-	struct debug_ref_store *drefs = (struct debug_ref_store *)ref_store;
-	int res =
-		drefs->refs->be->delete_refs(drefs->refs, msg, refnames, flags);
-	int i;
-	trace_printf_key(&trace_refs, "delete_refs {\n");
-	for (i = 0; i < refnames->nr; i++)
-		trace_printf_key(&trace_refs, "%s\n", refnames->items[i].string);
-	trace_printf_key(&trace_refs, "}: %d\n", res);
-	return res;
-}
-
 static int debug_rename_ref(struct ref_store *ref_store, const char *oldref,
 			    const char *newref, const char *logmsg)
 {
@@ -229,11 +215,12 @@ static struct ref_iterator_vtable debug_ref_iterator_vtable = {
 
 static struct ref_iterator *
 debug_ref_iterator_begin(struct ref_store *ref_store, const char *prefix,
-			 unsigned int flags)
+			 const char **exclude_patterns, unsigned int flags)
 {
 	struct debug_ref_store *drefs = (struct debug_ref_store *)ref_store;
 	struct ref_iterator *res =
-		drefs->refs->be->iterator_begin(drefs->refs, prefix, flags);
+		drefs->refs->be->iterator_begin(drefs->refs, prefix,
+						exclude_patterns, flags);
 	struct debug_ref_iterator *diter = xcalloc(1, sizeof(*diter));
 	base_ref_iterator_init(&diter->base, &debug_ref_iterator_vtable, 1);
 	diter->iter = res;
@@ -439,7 +426,6 @@ static int debug_reflog_expire(struct ref_store *ref_store, const char *refname,
 }
 
 struct ref_storage_be refs_be_debug = {
-	.next = NULL,
 	.name = "debug",
 	.init = NULL,
 	.init_db = debug_init_db,
@@ -457,7 +443,6 @@ struct ref_storage_be refs_be_debug = {
 
 	.pack_refs = debug_pack_refs,
 	.create_symref = debug_create_symref,
-	.delete_refs = debug_delete_refs,
 	.rename_ref = debug_rename_ref,
 	.copy_ref = debug_copy_ref,
 

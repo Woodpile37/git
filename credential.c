@@ -49,6 +49,7 @@ static int credential_from_potentially_partial_url(struct credential *c,
 						   const char *url);
 
 static int credential_config_callback(const char *var, const char *value,
+				      const struct config_context *ctx UNUSED,
 				      void *data)
 {
 	struct credential *c = data;
@@ -87,8 +88,8 @@ static int proto_is_http(const char *s)
 static void credential_describe(struct credential *c, struct strbuf *out);
 static void credential_format(struct credential *c, struct strbuf *out);
 
-static int select_all(const struct urlmatch_item *a,
-		      const struct urlmatch_item *b)
+static int select_all(const struct urlmatch_item *a UNUSED,
+		      const struct urlmatch_item *b UNUSED)
 {
 	return 0;
 }

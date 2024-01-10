@@ -66,13 +66,13 @@ test_expect_success FILEMODE 'mode update (index only)' '
 test_expect_success FILEMODE 'empty mode is rejected' '
 	git reset --hard &&
 	test_must_fail git apply patch-empty-mode.txt 2>err &&
-	test_i18ngrep "invalid mode" err
+	test_grep "invalid mode" err
 '
 
 test_expect_success FILEMODE 'bogus mode is rejected' '
 	git reset --hard &&
 	test_must_fail git apply patch-bogus-mode.txt 2>err &&
-	test_i18ngrep "invalid mode" err
+	test_grep "invalid mode" err
 '
 
 test_expect_success POSIXPERM 'do not use core.sharedRepository for working tree files' '
@@ -99,6 +99,33 @@ test_expect_success POSIXPERM 'do not use core.sharedRepository for working tree
 		test_cmp f1_mode.expected f1_mode.actual &&
 		test_cmp d_mode.expected d_mode.actual
 	)
+'
+
+test_expect_success 'git apply respects core.fileMode' '
+	test_config core.fileMode false &&
+	echo true >script.sh &&
+	git add --chmod=+x script.sh &&
+	git ls-files -s script.sh >ls-files-output &&
+	test_grep "^100755" ls-files-output &&
+	test_tick && git commit -m "Add script" &&
+	git ls-tree -r HEAD script.sh >ls-tree-output &&
+	test_grep "^100755" ls-tree-output &&
+
+	echo true >>script.sh &&
+	test_tick && git commit -m "Modify script" script.sh &&
+	git format-patch -1 --stdout >patch &&
+	test_grep "^index.*100755$" patch &&
+
+	git switch -c branch HEAD^ &&
+	git apply --index patch 2>err &&
+	test_grep ! "has type 100644, expected 100755" err &&
+	git reset --hard &&
+
+	git apply patch 2>err &&
+	test_grep ! "has type 100644, expected 100755" err &&
+
+	git apply --cached patch 2>err &&
+	test_grep ! "has type 100644, expected 100755" err
 '
 
 test_done

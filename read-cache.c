@@ -4,7 +4,6 @@
  * Copyright (C) Linus Torvalds, 2005
  */
 #include "git-compat-util.h"
-#include "alloc.h"
 #include "bulk-checkin.h"
 #include "config.h"
 #include "date.h"
@@ -21,7 +20,6 @@
 #include "oid-array.h"
 #include "tree.h"
 #include "commit.h"
-#include "blob.h"
 #include "environment.h"
 #include "gettext.h"
 #include "mem-pool.h"
@@ -32,7 +30,6 @@
 #include "read-cache.h"
 #include "resolve-undo.h"
 #include "revision.h"
-#include "run-command.h"
 #include "strbuf.h"
 #include "trace2.h"
 #include "varint.h"
@@ -46,7 +43,6 @@
 #include "csum-file.h"
 #include "promisor-remote.h"
 #include "hook.h"
-#include "wrapper.h"
 
 /* Mask for the name length in ce_flags in the on-disk index */
 
@@ -197,6 +193,33 @@ void fill_stat_cache_info(struct index_state *istate, struct cache_entry *ce, st
 		ce_mark_uptodate(ce);
 		mark_fsmonitor_valid(istate, ce);
 	}
+}
+
+static unsigned int st_mode_from_ce(const struct cache_entry *ce)
+{
+	extern int trust_executable_bit, has_symlinks;
+
+	switch (ce->ce_mode & S_IFMT) {
+	case S_IFLNK:
+		return has_symlinks ? S_IFLNK : (S_IFREG | 0644);
+	case S_IFREG:
+		return (ce->ce_mode & (trust_executable_bit ? 0755 : 0644)) | S_IFREG;
+	case S_IFGITLINK:
+		return S_IFDIR | 0755;
+	case S_IFDIR:
+		return ce->ce_mode;
+	default:
+		BUG("unsupported ce_mode: %o", ce->ce_mode);
+	}
+}
+
+int fake_lstat(const struct cache_entry *ce, struct stat *st)
+{
+	fake_lstat_data(&ce->ce_stat_data, st);
+	st->st_mode = st_mode_from_ce(ce);
+
+	/* always succeed as lstat() replacement */
+	return 0;
 }
 
 static int ce_compare_data(struct index_state *istate,
@@ -2236,6 +2259,7 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	if (fd < 0) {
 		if (!must_exist && errno == ENOENT) {
 			set_new_index_sparsity(istate);
+			istate->initialized = 1;
 			return 0;
 		}
 		die_errno(_("%s: index file open failed"), path);
@@ -2405,12 +2429,14 @@ int read_index_from(struct index_state *istate, const char *path,
 
 	base_oid_hex = oid_to_hex(&split_index->base_oid);
 	base_path = xstrfmt("%s/sharedindex.%s", gitdir, base_oid_hex);
-	trace2_region_enter_printf("index", "shared/do_read_index",
-				   the_repository, "%s", base_path);
-	ret = do_read_index(split_index->base, base_path, 0);
-	trace2_region_leave_printf("index", "shared/do_read_index",
-				   the_repository, "%s", base_path);
-	if (!ret) {
+	if (file_exists(base_path)) {
+		trace2_region_enter_printf("index", "shared/do_read_index",
+					the_repository, "%s", base_path);
+
+		ret = do_read_index(split_index->base, base_path, 0);
+		trace2_region_leave_printf("index", "shared/do_read_index",
+					the_repository, "%s", base_path);
+	} else {
 		char *path_copy = xstrdup(path);
 		char *base_path2 = xstrfmt("%s/sharedindex.%s",
 					   dirname(path_copy), base_oid_hex);

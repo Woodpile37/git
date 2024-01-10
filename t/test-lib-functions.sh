@@ -14,7 +14,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program.  If not, see http://www.gnu.org/licenses/ .
+# along with this program.  If not, see https://www.gnu.org/licenses/ .
 
 # The semantics of the editor variables are that of invoking
 # sh -c "$EDITOR \"$@\"" files ...
@@ -249,6 +249,61 @@ debug () {
 	do
 		rm -f "$HOME/$dotfile"
 	done
+}
+
+# Usage: test_ref_exists [options] <ref>
+#
+#   -C <dir>:
+#      Run all git commands in directory <dir>
+#
+# This helper function checks whether a reference exists. Symrefs or object IDs
+# will not be resolved. Can be used to check references with bad names.
+test_ref_exists () {
+	local indir=
+
+	while test $# != 0
+	do
+		case "$1" in
+		-C)
+			indir="$2"
+			shift
+			;;
+		*)
+			break
+			;;
+		esac
+		shift
+	done &&
+
+	indir=${indir:+"$indir"/} &&
+
+	if test "$#" != 1
+	then
+		BUG "expected exactly one reference"
+	fi &&
+
+	git ${indir:+ -C "$indir"} show-ref --exists "$1"
+}
+
+# Behaves the same as test_ref_exists, except that it checks for the absence of
+# a reference. This is preferable to `! test_ref_exists` as this function is
+# able to distinguish actually-missing references from other, generic errors.
+test_ref_missing () {
+	test_ref_exists "$@"
+	case "$?" in
+	2)
+		# This is the good case.
+		return 0
+		;;
+	0)
+		echo >&4 "test_ref_missing: reference exists"
+		return 1
+		;;
+	*)
+		echo >&4 "test_ref_missing: generic error"
+		return 1
+		;;
+	esac
 }
 
 # Usage: test_commit [options] <message> [<file> [<contents> [<tag>]]]
@@ -910,6 +965,15 @@ test_path_is_symlink () {
 	fi
 }
 
+test_path_is_executable () {
+	test "$#" -ne 1 && BUG "1 param"
+	if ! test -x "$1"
+	then
+		echo "$1 is not executable"
+		false
+	fi
+}
+
 # Check if the directory exists and is empty as expected, barf otherwise.
 test_dir_is_empty () {
 	test "$#" -ne 1 && BUG "1 param"
@@ -1199,19 +1263,21 @@ test_cmp_bin () {
 	cmp "$@"
 }
 
-# Wrapper for grep which used to be used for
-# GIT_TEST_GETTEXT_POISON=false. Only here as a shim for other
-# in-flight changes. Should not be used and will be removed soon.
+# Deprecated - do not use this in new code
 test_i18ngrep () {
+	test_grep "$@"
+}
+
+test_grep () {
 	eval "last_arg=\${$#}"
 
 	test -f "$last_arg" ||
-	BUG "test_i18ngrep requires a file to read as the last parameter"
+	BUG "test_grep requires a file to read as the last parameter"
 
 	if test $# -lt 2 ||
 	   { test "x!" = "x$1" && test $# -lt 3 ; }
 	then
-		BUG "too few parameters to test_i18ngrep"
+		BUG "too few parameters to test_grep"
 	fi
 
 	if test "x!" = "x$1"
@@ -1280,6 +1346,39 @@ test_cmp_rev () {
 			return 1
 		fi
 	fi
+}
+
+# Tests that a commit message matches the expected text
+#
+# Usage: test_commit_message <rev> [-m <msg> | <file>]
+#
+# When using "-m" <msg> will have a line feed appended. If the second
+# argument is omitted then the expected message is read from stdin.
+
+test_commit_message () {
+	local msg_file=expect.msg
+
+	case $# in
+	3)
+		if test "$2" = "-m"
+		then
+			printf "%s\n" "$3" >"$msg_file"
+		else
+			BUG "Usage: test_commit_message <rev> [-m <message> | <file>]"
+		fi
+		;;
+	2)
+		msg_file="$2"
+		;;
+	1)
+		cat >"$msg_file"
+		;;
+	*)
+		BUG "Usage: test_commit_message <rev> [-m <message> | <file>]"
+		;;
+	esac
+	git show --no-patch --pretty=format:%B "$1" -- >actual.msg &&
+	test_cmp "$msg_file" actual.msg
 }
 
 # Compare paths respecting core.ignoreCase
@@ -1557,7 +1656,21 @@ test_set_hash () {
 
 # Detect the hash algorithm in use.
 test_detect_hash () {
-	test_hash_algo="${GIT_TEST_DEFAULT_HASH:-sha1}"
+	case "$GIT_TEST_DEFAULT_HASH" in
+	"sha256")
+	    test_hash_algo=sha256
+	    test_compat_hash_algo=sha1
+	    ;;
+	*)
+	    test_hash_algo=sha1
+	    test_compat_hash_algo=sha256
+	    ;;
+	esac
+}
+
+# Detect the hash algorithm in use.
+test_detect_ref_format () {
+	echo "${GIT_TEST_DEFAULT_REF_FORMAT:-files}"
 }
 
 # Load common hash metadata and common placeholder object IDs for use with
@@ -1609,6 +1722,12 @@ test_oid () {
 	local algo="${test_hash_algo}" &&
 
 	case "$1" in
+	--hash=storage)
+		algo="$test_hash_algo" &&
+		shift;;
+	--hash=compat)
+		algo="$test_compat_hash_algo" &&
+		shift;;
 	--hash=*)
 		algo="${1#--hash=}" &&
 		shift;;
@@ -1773,6 +1892,20 @@ test_region () {
 	fi
 
 	return 0
+}
+
+# Check that the given data fragment was included as part of the
+# trace2-format trace on stdin.
+#
+#	test_trace2_data <category> <key> <value>
+#
+# For example, to look for trace2_data_intmax("pack-objects", repo,
+# "reused", N) in an invocation of "git pack-objects", run:
+#
+#	GIT_TRACE2_EVENT="$(pwd)/trace.txt" git pack-objects ... &&
+#	test_trace2_data pack-objects reused N <trace2.txt
+test_trace2_data () {
+	grep -e '"category":"'"$1"'","key":"'"$2"'","value":"'"$3"'"'
 }
 
 # Given a GIT_TRACE2_EVENT log over stdin, writes to stdout a list of URLs

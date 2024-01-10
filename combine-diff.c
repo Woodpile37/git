@@ -2,7 +2,6 @@
 #include "object-store-ll.h"
 #include "commit.h"
 #include "convert.h"
-#include "blob.h"
 #include "diff.h"
 #include "diffcore.h"
 #include "environment.h"
@@ -17,7 +16,6 @@
 #include "userdiff.h"
 #include "oid-array.h"
 #include "revision.h"
-#include "wrapper.h"
 
 static int compare_paths(const struct combine_diff_path *one,
 			  const struct diff_filespec *two)

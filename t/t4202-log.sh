@@ -927,7 +927,7 @@ test_expect_success 'multiple decorate-refs' '
 test_expect_success 'decorate-refs-exclude with glob' '
 	cat >expect.decorate <<-\EOF &&
 	Merge-tag-reach (HEAD -> main)
-	Merge-tags-octopus-a-and-octopus-b
+	Merge-tags-octopus-a-and-octopus-b (ORIG_HEAD)
 	seventh (tag: seventh)
 	octopus-b (tag: octopus-b)
 	octopus-a (tag: octopus-a)
@@ -944,7 +944,7 @@ test_expect_success 'decorate-refs-exclude with glob' '
 test_expect_success 'decorate-refs-exclude without globs' '
 	cat >expect.decorate <<-\EOF &&
 	Merge-tag-reach (HEAD -> main)
-	Merge-tags-octopus-a-and-octopus-b
+	Merge-tags-octopus-a-and-octopus-b (ORIG_HEAD)
 	seventh (tag: seventh)
 	octopus-b (tag: octopus-b, octopus-b)
 	octopus-a (tag: octopus-a, octopus-a)
@@ -961,7 +961,7 @@ test_expect_success 'decorate-refs-exclude without globs' '
 test_expect_success 'multiple decorate-refs-exclude' '
 	cat >expect.decorate <<-\EOF &&
 	Merge-tag-reach (HEAD -> main)
-	Merge-tags-octopus-a-and-octopus-b
+	Merge-tags-octopus-a-and-octopus-b (ORIG_HEAD)
 	seventh (tag: seventh)
 	octopus-b (tag: octopus-b)
 	octopus-a (tag: octopus-a)
@@ -1022,10 +1022,12 @@ test_expect_success 'decorate-refs-exclude and simplify-by-decoration' '
 	EOF
 	git log -n6 --decorate=short --pretty="tformat:%f%d" \
 		--decorate-refs-exclude="*octopus*" \
+		--decorate-refs-exclude="ORIG_HEAD" \
 		--simplify-by-decoration >actual &&
 	test_cmp expect.decorate actual &&
-	git -c log.excludeDecoration="*octopus*" log \
-		-n6 --decorate=short --pretty="tformat:%f%d" \
+	git -c log.excludeDecoration="*octopus*" \
+	    -c log.excludeDecoration="ORIG_HEAD" \
+	    log -n6 --decorate=short --pretty="tformat:%f%d" \
 		--simplify-by-decoration >actual &&
 	test_cmp expect.decorate actual
 '
@@ -1067,9 +1069,10 @@ test_expect_success 'decorate-refs and simplify-by-decoration without output' '
 	test_cmp expect actual
 '
 
-test_expect_success 'decorate-refs-exclude HEAD' '
+test_expect_success 'decorate-refs-exclude HEAD ORIG_HEAD' '
 	git log --decorate=full --oneline \
-		--decorate-refs-exclude="HEAD" >actual &&
+		--decorate-refs-exclude="HEAD" \
+		--decorate-refs-exclude="ORIG_HEAD" >actual &&
 	! grep HEAD actual
 '
 
@@ -1107,7 +1110,7 @@ test_expect_success '--clear-decorations overrides defaults' '
 
 	cat >expect.all <<-\EOF &&
 	Merge-tag-reach (HEAD -> refs/heads/main)
-	Merge-tags-octopus-a-and-octopus-b
+	Merge-tags-octopus-a-and-octopus-b (ORIG_HEAD)
 	seventh (tag: refs/tags/seventh)
 	octopus-b (tag: refs/tags/octopus-b, refs/heads/octopus-b)
 	octopus-a (tag: refs/tags/octopus-a, refs/heads/octopus-a)
@@ -1139,7 +1142,7 @@ test_expect_success '--clear-decorations clears previous exclusions' '
 	cat >expect.all <<-\EOF &&
 	Merge-tag-reach (HEAD -> refs/heads/main)
 	reach (tag: refs/tags/reach, refs/heads/reach)
-	Merge-tags-octopus-a-and-octopus-b
+	Merge-tags-octopus-a-and-octopus-b (ORIG_HEAD)
 	octopus-b (tag: refs/tags/octopus-b, refs/heads/octopus-b)
 	octopus-a (tag: refs/tags/octopus-a, refs/heads/octopus-a)
 	seventh (tag: refs/tags/seventh)
@@ -1884,7 +1887,7 @@ test_expect_success '--no-graph does not unset --parents' '
 
 test_expect_success '--reverse and --graph conflict' '
 	test_must_fail git log --reverse --graph 2>stderr &&
-	test_i18ngrep "cannot be used together" stderr
+	test_grep "cannot be used together" stderr
 '
 
 test_expect_success '--reverse --graph --no-graph works' '
@@ -1895,7 +1898,7 @@ test_expect_success '--reverse --graph --no-graph works' '
 
 test_expect_success '--show-linear-break and --graph conflict' '
 	test_must_fail git log --show-linear-break --graph 2>stderr &&
-	test_i18ngrep "cannot be used together" stderr
+	test_grep "cannot be used together" stderr
 '
 
 test_expect_success '--show-linear-break --graph --no-graph works' '
@@ -1906,7 +1909,7 @@ test_expect_success '--show-linear-break --graph --no-graph works' '
 
 test_expect_success '--no-walk and --graph conflict' '
 	test_must_fail git log --no-walk --graph 2>stderr &&
-	test_i18ngrep "cannot be used together" stderr
+	test_grep "cannot be used together" stderr
 '
 
 test_expect_success '--no-walk --graph --no-graph works' '
@@ -1917,8 +1920,8 @@ test_expect_success '--no-walk --graph --no-graph works' '
 
 test_expect_success '--walk-reflogs and --graph conflict' '
 	test_must_fail git log --walk-reflogs --graph 2>stderr &&
-	(test_i18ngrep "cannot combine" stderr ||
-		test_i18ngrep "cannot be used together" stderr)
+	(test_grep "cannot combine" stderr ||
+		test_grep "cannot be used together" stderr)
 '
 
 test_expect_success '--walk-reflogs --graph --no-graph works' '
@@ -2252,7 +2255,7 @@ test_expect_success 'log on empty repo fails' '
 	git init empty &&
 	test_when_finished "rm -rf empty" &&
 	test_must_fail git -C empty log 2>stderr &&
-	test_i18ngrep does.not.have.any.commits stderr
+	test_grep does.not.have.any.commits stderr
 '
 
 test_expect_success REFFILES 'log diagnoses bogus HEAD hash' '
@@ -2260,16 +2263,16 @@ test_expect_success REFFILES 'log diagnoses bogus HEAD hash' '
 	test_when_finished "rm -rf empty" &&
 	echo 1234abcd >empty/.git/refs/heads/main &&
 	test_must_fail git -C empty log 2>stderr &&
-	test_i18ngrep broken stderr
+	test_grep broken stderr
 '
 
 test_expect_success REFFILES 'log diagnoses bogus HEAD symref' '
 	git init empty &&
-	echo "ref: refs/heads/invalid.lock" > empty/.git/HEAD &&
+	test-tool -C empty ref-store main create-symref HEAD refs/heads/invalid.lock &&
 	test_must_fail git -C empty log 2>stderr &&
-	test_i18ngrep broken stderr &&
+	test_grep broken stderr &&
 	test_must_fail git -C empty log --default totally-bogus 2>stderr &&
-	test_i18ngrep broken stderr
+	test_grep broken stderr
 '
 
 test_expect_success 'log does not default to HEAD when rev input is given' '

@@ -16,17 +16,12 @@
 #include "editor.h"
 #include "environment.h"
 #include "diff.h"
-#include "diffcore.h"
 #include "commit.h"
 #include "gettext.h"
 #include "revision.h"
 #include "wt-status.h"
 #include "run-command.h"
-#include "hook.h"
-#include "refs.h"
-#include "log-tree.h"
 #include "strbuf.h"
-#include "utf8.h"
 #include "object-name.h"
 #include "parse-options.h"
 #include "path.h"
@@ -35,9 +30,6 @@
 #include "string-list.h"
 #include "rerere.h"
 #include "unpack-trees.h"
-#include "quote.h"
-#include "submodule.h"
-#include "gpg-interface.h"
 #include "column.h"
 #include "sequencer.h"
 #include "sparse-index.h"
@@ -340,7 +332,7 @@ static void create_base_index(const struct commit *current_head)
 	if (!tree)
 		die(_("failed to unpack HEAD tree object"));
 	parse_tree(tree);
-	init_tree_desc(&t, tree->buffer, tree->size);
+	init_tree_desc(&t, &tree->object.oid, tree->buffer, tree->size);
 	if (unpack_trees(1, &t, &opts))
 		exit(128); /* We've already reported the error, finish dying */
 }
@@ -455,7 +447,7 @@ static const char *prepare_index(const char **argv, const char *prefix,
 		refresh_cache_or_die(refresh_flags);
 		cache_tree_update(&the_index, WRITE_TREE_SILENT);
 		if (write_locked_index(&the_index, &index_lock, 0))
-			die(_("unable to write new_index file"));
+			die(_("unable to write new index file"));
 		commit_style = COMMIT_NORMAL;
 		ret = get_lock_file_path(&index_lock);
 		goto out;
@@ -479,7 +471,7 @@ static const char *prepare_index(const char **argv, const char *prefix,
 			cache_tree_update(&the_index, WRITE_TREE_SILENT);
 		if (write_locked_index(&the_index, &index_lock,
 				       COMMIT_LOCK | SKIP_IF_UNCHANGED))
-			die(_("unable to write new_index file"));
+			die(_("unable to write new index file"));
 		commit_style = COMMIT_AS_IS;
 		ret = get_index_file();
 		goto out;
@@ -527,7 +519,7 @@ static const char *prepare_index(const char **argv, const char *prefix,
 	refresh_index(&the_index, REFRESH_QUIET, NULL, NULL, NULL);
 	cache_tree_update(&the_index, WRITE_TREE_SILENT);
 	if (write_locked_index(&the_index, &index_lock, 0))
-		die(_("unable to write new_index file"));
+		die(_("unable to write new index file"));
 
 	hold_lock_file_for_update(&false_lock,
 				  git_path("next-index-%"PRIuMAX,
@@ -897,10 +889,10 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 	s->hints = 0;
 
 	if (clean_message_contents)
-		strbuf_stripspace(&sb, 0);
+		strbuf_stripspace(&sb, '\0');
 
 	if (signoff)
-		append_signoff(&sb, ignore_non_trailer(sb.buf, sb.len), 0);
+		append_signoff(&sb, ignored_log_message_bytes(sb.buf, sb.len), 0);
 
 	if (fwrite(sb.buf, 1, sb.len, s->fp) < sb.len)
 		die_errno(_("could not write commit template"));
@@ -1002,11 +994,8 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 		struct object_id oid;
 		const char *parent = "HEAD";
 
-		if (!the_index.cache_nr) {
-			discard_index(&the_index);
-			if (repo_read_index(the_repository) < 0)
-				die(_("Cannot read index"));
-		}
+		if (!the_index.initialized && repo_read_index(the_repository) < 0)
+			die(_("Cannot read index"));
 
 		if (amend)
 			parent = "HEAD^1";
@@ -1410,7 +1399,8 @@ static int parse_status_slot(const char *slot)
 	return LOOKUP_CONFIG(color_status_slots, slot);
 }
 
-static int git_status_config(const char *k, const char *v, void *cb)
+static int git_status_config(const char *k, const char *v,
+			     const struct config_context *ctx, void *cb)
 {
 	struct wt_status *s = cb;
 	const char *slot_name;
@@ -1419,7 +1409,8 @@ static int git_status_config(const char *k, const char *v, void *cb)
 		return git_column_config(k, v, "status", &s->colopts);
 	if (!strcmp(k, "status.submodulesummary")) {
 		int is_bool;
-		s->submodule_summary = git_config_bool_or_int(k, v, &is_bool);
+		s->submodule_summary = git_config_bool_or_int(k, v, ctx->kvi,
+							      &is_bool);
 		if (is_bool && s->submodule_summary)
 			s->submodule_summary = -1;
 		return 0;
@@ -1479,11 +1470,11 @@ static int git_status_config(const char *k, const char *v, void *cb)
 	}
 	if (!strcmp(k, "diff.renamelimit")) {
 		if (s->rename_limit == -1)
-			s->rename_limit = git_config_int(k, v);
+			s->rename_limit = git_config_int(k, v, ctx->kvi);
 		return 0;
 	}
 	if (!strcmp(k, "status.renamelimit")) {
-		s->rename_limit = git_config_int(k, v);
+		s->rename_limit = git_config_int(k, v, ctx->kvi);
 		return 0;
 	}
 	if (!strcmp(k, "diff.renames")) {
@@ -1495,7 +1486,7 @@ static int git_status_config(const char *k, const char *v, void *cb)
 		s->detect_rename = git_config_rename(k, v);
 		return 0;
 	}
-	return git_diff_ui_config(k, v, NULL);
+	return git_diff_ui_config(k, v, ctx, NULL);
 }
 
 int cmd_status(int argc, const char **argv, const char *prefix)
@@ -1610,7 +1601,8 @@ int cmd_status(int argc, const char **argv, const char *prefix)
 	return 0;
 }
 
-static int git_commit_config(const char *k, const char *v, void *cb)
+static int git_commit_config(const char *k, const char *v,
+			     const struct config_context *ctx, void *cb)
 {
 	struct wt_status *s = cb;
 
@@ -1628,11 +1620,12 @@ static int git_commit_config(const char *k, const char *v, void *cb)
 	}
 	if (!strcmp(k, "commit.verbose")) {
 		int is_bool;
-		config_commit_verbose = git_config_bool_or_int(k, v, &is_bool);
+		config_commit_verbose = git_config_bool_or_int(k, v, ctx->kvi,
+							       &is_bool);
 		return 0;
 	}
 
-	return git_status_config(k, v, s);
+	return git_status_config(k, v, ctx, s);
 }
 
 int cmd_commit(int argc, const char **argv, const char *prefix)
@@ -1861,7 +1854,7 @@ int cmd_commit(int argc, const char **argv, const char *prefix)
 
 	if (commit_index_files())
 		die(_("repository has been updated, but unable to write\n"
-		      "new_index file. Check that disk is not full and quota is\n"
+		      "new index file. Check that disk is not full and quota is\n"
 		      "not exceeded, and then \"git restore --staged :/\" to recover."));
 
 	git_test_write_commit_graph_or_die();

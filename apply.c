@@ -9,11 +9,9 @@
 
 #include "git-compat-util.h"
 #include "abspath.h"
-#include "alloc.h"
 #include "base85.h"
 #include "config.h"
 #include "object-store-ll.h"
-#include "blob.h"
 #include "delta.h"
 #include "diff.h"
 #include "dir.h"
@@ -37,7 +35,6 @@
 #include "symlinks.h"
 #include "wildmatch.h"
 #include "ws.h"
-#include "wrapper.h"
 
 struct gitdiff_data {
 	struct strbuf *root;
@@ -414,9 +411,10 @@ static void say_patch_name(FILE *output, const char *fmt, struct patch *patch)
 
 static int read_patch_file(struct strbuf *sb, int fd)
 {
-	if (strbuf_read(sb, fd, 0) < 0 || sb->len >= MAX_APPLY_SIZE)
-		return error_errno("git apply: failed to read");
-
+	if (strbuf_read(sb, fd, 0) < 0)
+		return error_errno(_("failed to read patch"));
+	else if (sb->len >= MAX_APPLY_SIZE)
+		return error(_("patch too large"));
 	/*
 	 * Make sure that we have some slop in the buffer
 	 * so that we can do speculative "memcmp" etc, and
@@ -2221,7 +2219,8 @@ static void reverse_patches(struct patch *p)
 		struct fragment *frag = p->fragments;
 
 		SWAP(p->new_name, p->old_name);
-		SWAP(p->new_mode, p->old_mode);
+		if (p->new_mode)
+			SWAP(p->new_mode, p->old_mode);
 		SWAP(p->is_new, p->is_delete);
 		SWAP(p->lines_added, p->lines_deleted);
 		SWAP(p->old_oid_prefix, p->new_oid_prefix);
@@ -3779,8 +3778,17 @@ static int check_preimage(struct apply_state *state,
 		return error_errno("%s", old_name);
 	}
 
-	if (!state->cached && !previous)
-		st_mode = ce_mode_from_stat(*ce, st->st_mode);
+	if (!state->cached && !previous) {
+		if (*ce && !(*ce)->ce_mode)
+			BUG("ce_mode == 0 for path '%s'", old_name);
+
+		if (trust_executable_bit)
+			st_mode = ce_mode_from_stat(*ce, st->st_mode);
+		else if (*ce)
+			st_mode = (*ce)->ce_mode;
+		else
+			st_mode = patch->old_mode;
+	}
 
 	if (patch->is_new < 0)
 		patch->is_new = 0;

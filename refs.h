@@ -11,6 +11,9 @@ struct string_list;
 struct string_list_item;
 struct worktree;
 
+unsigned int ref_storage_format_by_name(const char *name);
+const char *ref_storage_format_to_name(unsigned int ref_storage_format);
+
 /*
  * Resolve a reference, recursively following symbolic refererences.
  *
@@ -56,7 +59,7 @@ struct worktree;
  * Even with RESOLVE_REF_ALLOW_BAD_NAME, names that escape the refs/
  * directory and do not consist of all caps and underscores cannot be
  * resolved. The function returns NULL for such ref names.
- * Caps and underscores refers to the special refs, such as HEAD,
+ * Caps and underscores refers to the pseudorefs, such as HEAD,
  * FETCH_HEAD and friends, that all live outside of the refs/ directory.
  */
 #define RESOLVE_REF_READING 0x01
@@ -123,7 +126,9 @@ int should_autocreate_reflog(const char *refname);
 
 int is_branch(const char *refname);
 
-int refs_init_db(struct strbuf *err);
+#define REFS_INIT_DB_IS_WORKTREE (1 << 0)
+
+int refs_init_db(struct ref_store *refs, int flags, struct strbuf *err);
 
 /*
  * Return the peeled value of the oid currently being iterated via
@@ -320,6 +325,8 @@ typedef int each_repo_ref_fn(struct repository *r,
  */
 int refs_head_ref(struct ref_store *refs,
 		  each_ref_fn fn, void *cb_data);
+int refs_for_each_pseudoref(struct ref_store *refs,
+			    each_ref_fn fn, void *cb_data);
 int refs_for_each_ref(struct ref_store *refs,
 		      each_ref_fn fn, void *cb_data);
 int refs_for_each_ref_in(struct ref_store *refs, const char *prefix,
@@ -334,6 +341,9 @@ int refs_for_each_remote_ref(struct ref_store *refs,
 /* just iterates the head ref. */
 int head_ref(each_ref_fn fn, void *cb_data);
 
+/* iterates pseudorefs. */
+int for_each_pseudoref(each_ref_fn fn, void *cb_data);
+
 /* iterates all refs. */
 int for_each_ref(each_ref_fn fn, void *cb_data);
 
@@ -343,7 +353,12 @@ int for_each_ref(each_ref_fn fn, void *cb_data);
  */
 int for_each_ref_in(const char *prefix, each_ref_fn fn, void *cb_data);
 
+/*
+ * references matching any pattern in "exclude_patterns" are omitted from the
+ * result set on a best-effort basis.
+ */
 int refs_for_each_fullref_in(struct ref_store *refs, const char *prefix,
+			     const char **exclude_patterns,
 			     each_ref_fn fn, void *cb_data);
 int for_each_fullref_in(const char *prefix, each_ref_fn fn, void *cb_data);
 
@@ -351,10 +366,15 @@ int for_each_fullref_in(const char *prefix, each_ref_fn fn, void *cb_data);
  * iterate all refs in "patterns" by partitioning patterns into disjoint sets
  * and iterating the longest-common prefix of each set.
  *
+ * references matching any pattern in "exclude_patterns" are omitted from the
+ * result set on a best-effort basis.
+ *
  * callers should be prepared to ignore references that they did not ask for.
  */
 int refs_for_each_fullref_in_prefixes(struct ref_store *refs,
-				      const char *namespace, const char **patterns,
+				      const char *namespace,
+				      const char **patterns,
+				      const char **exclude_patterns,
 				      each_ref_fn fn, void *cb_data);
 
 /**
@@ -372,7 +392,12 @@ int for_each_glob_ref_in(each_ref_fn fn, const char *pattern,
 			 const char *prefix, void *cb_data);
 
 int head_ref_namespaced(each_ref_fn fn, void *cb_data);
-int for_each_namespaced_ref(each_ref_fn fn, void *cb_data);
+/*
+ * references matching any pattern in "exclude_patterns" are omitted from the
+ * result set on a best-effort basis.
+ */
+int for_each_namespaced_ref(const char **exclude_patterns,
+			    each_ref_fn fn, void *cb_data);
 
 /* can be used to learn about broken ref and symref */
 int refs_for_each_rawref(struct ref_store *refs, each_ref_fn fn, void *cb_data);
@@ -810,7 +835,7 @@ int update_ref(const char *msg, const char *refname,
 	       unsigned int flags, enum action_on_err onerr);
 
 int parse_hide_refs_config(const char *var, const char *value, const char *,
-			   struct string_list *);
+			   struct strvec *);
 
 /*
  * Check whether a ref is hidden. If no namespace is set, both the first and
@@ -820,7 +845,13 @@ int parse_hide_refs_config(const char *var, const char *value, const char *,
  * the ref is outside that namespace, the first parameter is NULL. The second
  * parameter always points to the full ref name.
  */
-int ref_is_hidden(const char *, const char *, const struct string_list *);
+int ref_is_hidden(const char *, const char *, const struct strvec *);
+
+/*
+ * Returns an array of patterns to use as excluded_patterns, if none of the
+ * hidden references use the token '!' or '^'.
+ */
+const char **hidden_refs_to_excludes(const struct strvec *hide_refs);
 
 /* Is this a per-worktree ref living in the refs/ namespace? */
 int is_per_worktree_ref(const char *refname);

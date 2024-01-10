@@ -1,6 +1,5 @@
 #include "git-compat-util.h"
 #include "abspath.h"
-#include "alloc.h"
 #include "environment.h"
 #include "gettext.h"
 #include "path.h"
@@ -12,20 +11,24 @@
 #include "dir.h"
 #include "wt-status.h"
 #include "config.h"
-#include "wrapper.h"
+
+void free_worktree(struct worktree *worktree)
+{
+	if (!worktree)
+		return;
+	free(worktree->path);
+	free(worktree->id);
+	free(worktree->head_ref);
+	free(worktree->lock_reason);
+	free(worktree->prune_reason);
+	free(worktree);
+}
 
 void free_worktrees(struct worktree **worktrees)
 {
 	int i = 0;
-
-	for (i = 0; worktrees[i]; i++) {
-		free(worktrees[i]->path);
-		free(worktrees[i]->id);
-		free(worktrees[i]->head_ref);
-		free(worktrees[i]->lock_reason);
-		free(worktrees[i]->prune_reason);
-		free(worktrees[i]);
-	}
+	for (i = 0; worktrees[i]; i++)
+		free_worktree(worktrees[i]);
 	free (worktrees);
 }
 
@@ -53,7 +56,7 @@ static void add_head_info(struct worktree *wt)
 /**
  * get the main worktree
  */
-static struct worktree *get_main_worktree(void)
+static struct worktree *get_main_worktree(int skip_reading_head)
 {
 	struct worktree *worktree = NULL;
 	struct strbuf worktree_path = STRBUF_INIT;
@@ -72,11 +75,13 @@ static struct worktree *get_main_worktree(void)
 	 */
 	worktree->is_bare = (is_bare_repository_cfg == 1) ||
 		is_bare_repository();
-	add_head_info(worktree);
+	if (!skip_reading_head)
+		add_head_info(worktree);
 	return worktree;
 }
 
-static struct worktree *get_linked_worktree(const char *id)
+struct worktree *get_linked_worktree(const char *id,
+				     int skip_reading_head)
 {
 	struct worktree *worktree = NULL;
 	struct strbuf path = STRBUF_INIT;
@@ -95,7 +100,8 @@ static struct worktree *get_linked_worktree(const char *id)
 	CALLOC_ARRAY(worktree, 1);
 	worktree->path = strbuf_detach(&worktree_path, NULL);
 	worktree->id = xstrdup(id);
-	add_head_info(worktree);
+	if (!skip_reading_head)
+		add_head_info(worktree);
 
 done:
 	strbuf_release(&path);
@@ -120,7 +126,14 @@ static void mark_current_worktree(struct worktree **worktrees)
 	free(git_dir);
 }
 
-struct worktree **get_worktrees(void)
+/*
+ * NEEDSWORK: This function exists so that we can look up metadata of a
+ * worktree without trying to access any of its internals like the refdb. It
+ * would be preferable to instead have a corruption-tolerant function for
+ * retrieving worktree metadata that could be used when the worktree is known
+ * to not be in a healthy state, e.g. when creating or repairing it.
+ */
+static struct worktree **get_worktrees_internal(int skip_reading_head)
 {
 	struct worktree **list = NULL;
 	struct strbuf path = STRBUF_INIT;
@@ -130,7 +143,7 @@ struct worktree **get_worktrees(void)
 
 	ALLOC_ARRAY(list, alloc);
 
-	list[counter++] = get_main_worktree();
+	list[counter++] = get_main_worktree(skip_reading_head);
 
 	strbuf_addf(&path, "%s/worktrees", get_git_common_dir());
 	dir = opendir(path.buf);
@@ -139,7 +152,7 @@ struct worktree **get_worktrees(void)
 		while ((d = readdir_skip_dot_and_dotdot(dir)) != NULL) {
 			struct worktree *linked = NULL;
 
-			if ((linked = get_linked_worktree(d->d_name))) {
+			if ((linked = get_linked_worktree(d->d_name, skip_reading_head))) {
 				ALLOC_GROW(list, counter + 1, alloc);
 				list[counter++] = linked;
 			}
@@ -151,6 +164,11 @@ struct worktree **get_worktrees(void)
 
 	mark_current_worktree(list);
 	return list;
+}
+
+struct worktree **get_worktrees(void)
+{
+	return get_worktrees_internal(0);
 }
 
 const char *get_worktree_git_dir(const struct worktree *wt)
@@ -397,9 +415,9 @@ int is_worktree_being_bisected(const struct worktree *wt,
 
 	memset(&state, 0, sizeof(state));
 	found_bisect = wt_status_check_bisect(wt, &state) &&
-		       state.branch &&
+		       state.bisecting_from &&
 		       skip_prefix(target, "refs/heads/", &target) &&
-		       !strcmp(state.branch, target);
+		       !strcmp(state.bisecting_from, target);
 	wt_status_state_free_buffers(&state);
 	return found_bisect;
 }
@@ -583,15 +601,17 @@ static void repair_gitfile(struct worktree *wt,
 	strbuf_release(&dotgit);
 }
 
-static void repair_noop(int iserr, const char *path, const char *msg,
-			void *cb_data)
+static void repair_noop(int iserr UNUSED,
+			const char *path UNUSED,
+			const char *msg UNUSED,
+			void *cb_data UNUSED)
 {
 	/* nothing */
 }
 
 void repair_worktrees(worktree_repair_fn fn, void *cb_data)
 {
-	struct worktree **worktrees = get_worktrees();
+	struct worktree **worktrees = get_worktrees_internal(1);
 	struct worktree **wt = worktrees + 1; /* +1 skips main worktree */
 
 	if (!fn)
@@ -836,7 +856,7 @@ int init_worktree_config(struct repository *r)
 	 * Relocate that value to avoid breaking all worktrees with this
 	 * upgrade to worktree config.
 	 */
-	if (!git_configset_get_value(&cs, "core.worktree", &core_worktree)) {
+	if (!git_configset_get_value(&cs, "core.worktree", &core_worktree, NULL)) {
 		if ((res = move_config_setting("core.worktree", core_worktree,
 					       common_config_file,
 					       main_worktree_file)))

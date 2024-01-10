@@ -10,13 +10,10 @@
 #include "refs.h"
 #include "pack.h"
 #include "cache-tree.h"
-#include "tree-walk.h"
 #include "fsck.h"
 #include "parse-options.h"
-#include "dir.h"
 #include "progress.h"
 #include "streaming.h"
-#include "decorate.h"
 #include "packfile.h"
 #include "object-file.h"
 #include "object-name.h"
@@ -92,11 +89,11 @@ static int objerror(struct object *obj, const char *err)
 	return -1;
 }
 
-static int fsck_error_func(struct fsck_options *o,
+static int fsck_error_func(struct fsck_options *o UNUSED,
 			   const struct object_id *oid,
 			   enum object_type object_type,
 			   enum fsck_msg_type msg_type,
-			   enum fsck_msg_id msg_id,
+			   enum fsck_msg_id msg_id UNUSED,
 			   const char *message)
 {
 	switch (msg_type) {
@@ -121,7 +118,7 @@ static int fsck_error_func(struct fsck_options *o,
 static struct object_array pending;
 
 static int mark_object(struct object *obj, enum object_type type,
-		       void *data, struct fsck_options *options)
+		       void *data, struct fsck_options *options UNUSED)
 {
 	struct object *parent = data;
 
@@ -206,8 +203,8 @@ static int traverse_reachable(void)
 	return !!result;
 }
 
-static int mark_used(struct object *obj, enum object_type object_type,
-		     void *data, struct fsck_options *options)
+static int mark_used(struct object *obj, enum object_type type UNUSED,
+		     void *data UNUSED, struct fsck_options *options UNUSED)
 {
 	if (!obj)
 		return 1;
@@ -810,7 +807,7 @@ static int fsck_resolve_undo(struct index_state *istate,
 }
 
 static void fsck_index(struct index_state *istate, const char *index_path,
-		       int is_main_index)
+		       int is_current_worktree)
 {
 	unsigned int i;
 
@@ -832,7 +829,7 @@ static void fsck_index(struct index_state *istate, const char *index_path,
 		obj->flags |= USED;
 		fsck_put_object_name(&fsck_walk_options, &obj->oid,
 				     "%s:%s",
-				     is_main_index ? "" : index_path,
+				     is_current_worktree ? "" : index_path,
 				     istate->cache[i]->name);
 		mark_object_reachable(obj);
 	}
@@ -1074,6 +1071,10 @@ int cmd_fsck(int argc, const char **argv, const char *prefix)
 			commit_graph_verify.git_cmd = 1;
 			strvec_pushl(&commit_graph_verify.args, "commit-graph",
 				     "verify", "--object-dir", odb->path, NULL);
+			if (show_progress)
+				strvec_push(&commit_graph_verify.args, "--progress");
+			else
+				strvec_push(&commit_graph_verify.args, "--no-progress");
 			if (run_command(&commit_graph_verify))
 				errors_found |= ERROR_COMMIT_GRAPH;
 		}
@@ -1088,6 +1089,10 @@ int cmd_fsck(int argc, const char **argv, const char *prefix)
 			midx_verify.git_cmd = 1;
 			strvec_pushl(&midx_verify.args, "multi-pack-index",
 				     "verify", "--object-dir", odb->path, NULL);
+			if (show_progress)
+				strvec_push(&midx_verify.args, "--progress");
+			else
+				strvec_push(&midx_verify.args, "--no-progress");
 			if (run_command(&midx_verify))
 				errors_found |= ERROR_MULTI_PACK_INDEX;
 		}

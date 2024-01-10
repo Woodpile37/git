@@ -28,7 +28,6 @@
 #include "setup.h"
 #include "shallow.h"
 #include "trace.h"
-#include "wrapper.h"
 #include "write-or-die.h"
 
 int trust_executable_bit = 1;
@@ -65,7 +64,7 @@ const char *excludes_file;
 enum auto_crlf auto_crlf = AUTO_CRLF_FALSE;
 enum eol core_eol = EOL_UNSET;
 int global_conv_flags_eol = CONV_EOL_RNDTRP_WARN;
-char *check_roundtrip_encoding = "SHIFT-JIS";
+const char *check_roundtrip_encoding = "SHIFT-JIS";
 enum branch_track git_branch_track = BRANCH_TRACK_REMOTE;
 enum rebase_setup_type autorebase = AUTOREBASE_NEVER;
 enum push_default_type push_default = PUSH_DEFAULT_UNSPECIFIED;
@@ -74,7 +73,7 @@ enum push_default_type push_default = PUSH_DEFAULT_UNSPECIFIED;
 #endif
 enum object_creation_mode object_creation_mode = OBJECT_CREATION_MODE;
 char *notes_ref_name;
-int grafts_replace_parents = 1;
+int grafts_keep_true_parents;
 int core_apply_sparse_checkout;
 int core_sparse_checkout_cone;
 int sparse_expect_files_outside_of_patterns;
@@ -82,6 +81,20 @@ int merge_log_config = -1;
 int precomposed_unicode = -1; /* see probe_utf8_pathname_composition() */
 unsigned long pack_size_limit_cfg;
 enum log_refs_config log_all_ref_updates = LOG_REFS_UNSET;
+int max_allowed_tree_depth =
+#ifdef _MSC_VER
+	/*
+	 * When traversing into too-deep trees, Visual C-compiled Git seems to
+	 * run into some internal stack overflow detection in the
+	 * `RtlpAllocateHeap()` function that is called from within
+	 * `git_inflate_init()`'s call tree. The following value seems to be
+	 * low enough to avoid that by letting Git exit with an error before
+	 * the stack overflow can occur.
+	 */
+	512;
+#else
+	2048;
+#endif
 
 #ifndef PROTECT_HFS_DEFAULT
 #define PROTECT_HFS_DEFAULT 0

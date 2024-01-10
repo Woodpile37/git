@@ -533,10 +533,13 @@ void free_diffstat_info(struct diffstat_t *diffstat);
 int parse_long_opt(const char *opt, const char **argv,
 		   const char **optarg);
 
-int git_diff_basic_config(const char *var, const char *value, void *cb);
+struct config_context;
+int git_diff_basic_config(const char *var, const char *value,
+			  const struct config_context *ctx, void *cb);
 int git_diff_heuristic_config(const char *var, const char *value, void *cb);
 void init_diff_ui_defaults(void);
-int git_diff_ui_config(const char *var, const char *value, void *cb);
+int git_diff_ui_config(const char *var, const char *value,
+		       const struct config_context *ctx, void *cb);
 void repo_diff_setup(struct repository *, struct diff_options *);
 struct option *add_diff_options(const struct option *, struct diff_options *);
 int diff_opt_parse(struct diff_options *, const char **, int, const char *);
@@ -570,6 +573,7 @@ int git_config_rename(const char *var, const char *value);
 
 #define DIFF_PICKAXE_IGNORE_CASE	32
 
+void init_diffstat_widths(struct diff_options *);
 void diffcore_std(struct diff_options *);
 void diffcore_fix_diff_index(void);
 
@@ -634,17 +638,17 @@ void diff_get_merge_base(const struct rev_info *revs, struct object_id *mb);
 #define DIFF_SILENT_ON_REMOVED 01
 /* report racily-clean paths as modified */
 #define DIFF_RACY_IS_MODIFIED 02
-int run_diff_files(struct rev_info *revs, unsigned int option);
+void run_diff_files(struct rev_info *revs, unsigned int option);
 
 #define DIFF_INDEX_CACHED 01
 #define DIFF_INDEX_MERGE_BASE 02
-int run_diff_index(struct rev_info *revs, unsigned int option);
+void run_diff_index(struct rev_info *revs, unsigned int option);
 
 int do_diff_cache(const struct object_id *, struct diff_options *);
 int diff_flush_patch_id(struct diff_options *, struct object_id *, int);
 void flush_one_hunk(struct object_id *result, git_hash_ctx *ctx);
 
-int diff_result_code(struct diff_options *, int);
+int diff_result_code(struct diff_options *);
 
 int diff_no_index(struct rev_info *,
 		  int implicit_no_index, int, const char **);

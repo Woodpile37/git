@@ -1,5 +1,4 @@
 #include "../git-compat-util.h"
-#include "../config.h"
 #include "../copy.h"
 #include "../environment.h"
 #include "../gettext.h"
@@ -19,7 +18,6 @@
 #include "../dir.h"
 #include "../chdir-notify.h"
 #include "../setup.h"
-#include "../worktree.h"
 #include "../wrapper.h"
 #include "../write-or-die.h"
 #include "../revision.h"
@@ -246,10 +244,8 @@ static void loose_fill_ref_dir(struct ref_store *ref_store,
 	int dirnamelen = strlen(dirname);
 	struct strbuf refname;
 	struct strbuf path = STRBUF_INIT;
-	size_t path_baselen;
 
 	files_ref_path(refs, &path, dirname);
-	path_baselen = path.len;
 
 	d = opendir(path.buf);
 	if (!d) {
@@ -262,23 +258,22 @@ static void loose_fill_ref_dir(struct ref_store *ref_store,
 
 	while ((de = readdir(d)) != NULL) {
 		struct object_id oid;
-		struct stat st;
 		int flag;
+		unsigned char dtype;
 
 		if (de->d_name[0] == '.')
 			continue;
 		if (ends_with(de->d_name, ".lock"))
 			continue;
 		strbuf_addstr(&refname, de->d_name);
-		strbuf_addstr(&path, de->d_name);
-		if (stat(path.buf, &st) < 0) {
-			; /* silently ignore */
-		} else if (S_ISDIR(st.st_mode)) {
+
+		dtype = get_dtype(de, &path, 1);
+		if (dtype == DT_DIR) {
 			strbuf_addch(&refname, '/');
 			add_entry_to_dir(dir,
 					 create_dir_entry(dir->cache, refname.buf,
 							  refname.len));
-		} else {
+		} else if (dtype == DT_REG) {
 			if (!refs_resolve_ref_unsafe(&refs->base,
 						     refname.buf,
 						     RESOLVE_REF_READING,
@@ -308,7 +303,6 @@ static void loose_fill_ref_dir(struct ref_store *ref_store,
 					 create_ref_entry(refname.buf, &oid, flag));
 		}
 		strbuf_setlen(&refname, dirnamelen);
-		strbuf_setlen(&path, path_baselen);
 	}
 	strbuf_release(&refname);
 	strbuf_release(&path);
@@ -832,7 +826,8 @@ static struct ref_iterator_vtable files_ref_iterator_vtable = {
 
 static struct ref_iterator *files_ref_iterator_begin(
 		struct ref_store *ref_store,
-		const char *prefix, unsigned int flags)
+		const char *prefix, const char **exclude_patterns,
+		unsigned int flags)
 {
 	struct files_ref_store *refs;
 	struct ref_iterator *loose_iter, *packed_iter, *overlay_iter;
@@ -877,7 +872,7 @@ static struct ref_iterator *files_ref_iterator_begin(
 	 * the packed and loose references.
 	 */
 	packed_iter = refs_ref_iterator_begin(
-			refs->packed_ref_store, prefix, 0,
+			refs->packed_ref_store, prefix, exclude_patterns, 0,
 			DO_FOR_EACH_INCLUDE_BROKEN);
 
 	overlay_iter = overlay_ref_iterator_begin(loose_iter, packed_iter);
@@ -1266,54 +1261,6 @@ static int files_pack_refs(struct ref_store *ref_store,
 	prune_refs(refs, &refs_to_prune);
 	strbuf_release(&err);
 	return 0;
-}
-
-static int files_delete_refs(struct ref_store *ref_store, const char *msg,
-			     struct string_list *refnames, unsigned int flags)
-{
-	struct files_ref_store *refs =
-		files_downcast(ref_store, REF_STORE_WRITE, "delete_refs");
-	struct strbuf err = STRBUF_INIT;
-	int i, result = 0;
-
-	if (!refnames->nr)
-		return 0;
-
-	if (packed_refs_lock(refs->packed_ref_store, 0, &err))
-		goto error;
-
-	if (refs_delete_refs(refs->packed_ref_store, msg, refnames, flags)) {
-		packed_refs_unlock(refs->packed_ref_store);
-		goto error;
-	}
-
-	packed_refs_unlock(refs->packed_ref_store);
-
-	for (i = 0; i < refnames->nr; i++) {
-		const char *refname = refnames->items[i].string;
-
-		if (refs_delete_ref(&refs->base, msg, refname, NULL, flags))
-			result |= error(_("could not remove reference %s"), refname);
-	}
-
-	strbuf_release(&err);
-	return result;
-
-error:
-	/*
-	 * If we failed to rewrite the packed-refs file, then it is
-	 * unsafe to try to remove loose refs, because doing so might
-	 * expose an obsolete packed value for a reference that might
-	 * even point at an object that has been garbage collected.
-	 */
-	if (refnames->nr == 1)
-		error(_("could not delete reference %s: %s"),
-		      refnames->items[0].string, err.buf);
-	else
-		error(_("could not delete references: %s"), err.buf);
-
-	strbuf_release(&err);
-	return -1;
 }
 
 /*
@@ -3271,28 +3218,52 @@ static int files_reflog_expire(struct ref_store *ref_store,
 	return -1;
 }
 
-static int files_init_db(struct ref_store *ref_store, struct strbuf *err UNUSED)
+static int files_init_db(struct ref_store *ref_store,
+			 int flags,
+			 struct strbuf *err UNUSED)
 {
 	struct files_ref_store *refs =
 		files_downcast(ref_store, REF_STORE_WRITE, "init_db");
 	struct strbuf sb = STRBUF_INIT;
 
 	/*
-	 * Create .git/refs/{heads,tags}
+	 * We need to create a "refs" dir in any case so that older versions of
+	 * Git can tell that this is a repository. This serves two main purposes:
+	 *
+	 * - Clients will know to stop walking the parent-directory chain when
+	 *   detecting the Git repository. Otherwise they may end up detecting
+	 *   a Git repository in a parent directory instead.
+	 *
+	 * - Instead of failing to detect a repository with unknown reference
+	 *   format altogether, old clients will print an error saying that
+	 *   they do not understand the reference format extension.
 	 */
-	files_ref_path(refs, &sb, "refs/heads");
+	strbuf_addf(&sb, "%s/refs", ref_store->gitdir);
 	safe_create_dir(sb.buf, 1);
+	adjust_shared_perm(sb.buf);
 
-	strbuf_reset(&sb);
-	files_ref_path(refs, &sb, "refs/tags");
-	safe_create_dir(sb.buf, 1);
+	/*
+	 * There is no need to create directories for common refs when creating
+	 * a worktree ref store.
+	 */
+	if (!(flags & REFS_INIT_DB_IS_WORKTREE)) {
+		/*
+		 * Create .git/refs/{heads,tags}
+		 */
+		strbuf_reset(&sb);
+		files_ref_path(refs, &sb, "refs/heads");
+		safe_create_dir(sb.buf, 1);
+
+		strbuf_reset(&sb);
+		files_ref_path(refs, &sb, "refs/tags");
+		safe_create_dir(sb.buf, 1);
+	}
 
 	strbuf_release(&sb);
 	return 0;
 }
 
 struct ref_storage_be refs_be_files = {
-	.next = NULL,
 	.name = "files",
 	.init = files_ref_store_create,
 	.init_db = files_init_db,
@@ -3303,7 +3274,6 @@ struct ref_storage_be refs_be_files = {
 
 	.pack_refs = files_pack_refs,
 	.create_symref = files_create_symref,
-	.delete_refs = files_delete_refs,
 	.rename_ref = files_rename_ref,
 	.copy_ref = files_copy_ref,
 

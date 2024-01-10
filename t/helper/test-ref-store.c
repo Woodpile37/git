@@ -186,6 +186,15 @@ static int cmd_for_each_ref(struct ref_store *refs, const char **argv)
 	return refs_for_each_ref_in(refs, prefix, each_ref, NULL);
 }
 
+static int cmd_for_each_ref__exclude(struct ref_store *refs, const char **argv)
+{
+	const char *prefix = notnull(*argv++, "prefix");
+	const char **exclude_patterns = argv;
+
+	return refs_for_each_fullref_in(refs, prefix, exclude_patterns, each_ref,
+					NULL);
+}
+
 static int cmd_resolve_ref(struct ref_store *refs, const char **argv)
 {
 	struct object_id oid = *null_oid();
@@ -268,11 +277,6 @@ static int cmd_delete_reflog(struct ref_store *refs, const char **argv)
 	return refs_delete_reflog(refs, refname);
 }
 
-static int cmd_reflog_expire(struct ref_store *refs, const char **argv)
-{
-	die("not supported yet");
-}
-
 static int cmd_delete_ref(struct ref_store *refs, const char **argv)
 {
 	const char *msg = notnull(*argv++, "msg");
@@ -294,16 +298,19 @@ static int cmd_update_ref(struct ref_store *refs, const char **argv)
 	const char *new_sha1_buf = notnull(*argv++, "new-sha1");
 	const char *old_sha1_buf = notnull(*argv++, "old-sha1");
 	unsigned int flags = arg_flags(*argv++, "flags", transaction_flags);
-	struct object_id old_oid;
+	struct object_id old_oid, *old_oid_ptr = NULL;
 	struct object_id new_oid;
 
-	if (get_oid_hex(old_sha1_buf, &old_oid))
-		die("cannot parse %s as %s", old_sha1_buf, the_hash_algo->name);
+	if (*old_sha1_buf) {
+		if (get_oid_hex(old_sha1_buf, &old_oid))
+			die("cannot parse %s as %s", old_sha1_buf, the_hash_algo->name);
+		old_oid_ptr = &old_oid;
+	}
 	if (get_oid_hex(new_sha1_buf, &new_oid))
 		die("cannot parse %s as %s", new_sha1_buf, the_hash_algo->name);
 
 	return refs_update_ref(refs, msg, refname,
-			       &new_oid, &old_oid,
+			       &new_oid, old_oid_ptr,
 			       flags, UPDATE_REFS_DIE_ON_ERR);
 }
 
@@ -318,6 +325,7 @@ static struct command commands[] = {
 	{ "delete-refs", cmd_delete_refs },
 	{ "rename-ref", cmd_rename_ref },
 	{ "for-each-ref", cmd_for_each_ref },
+	{ "for-each-ref--exclude", cmd_for_each_ref__exclude },
 	{ "resolve-ref", cmd_resolve_ref },
 	{ "verify-ref", cmd_verify_ref },
 	{ "for-each-reflog", cmd_for_each_reflog },
@@ -326,7 +334,6 @@ static struct command commands[] = {
 	{ "reflog-exists", cmd_reflog_exists },
 	{ "create-reflog", cmd_create_reflog },
 	{ "delete-reflog", cmd_delete_reflog },
-	{ "reflog-expire", cmd_reflog_expire },
 	/*
 	 * backend transaction functions can't be tested separately
 	 */

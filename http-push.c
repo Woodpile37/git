@@ -6,10 +6,8 @@
 #include "tag.h"
 #include "blob.h"
 #include "http.h"
-#include "refs.h"
 #include "diff.h"
 #include "revision.h"
-#include "exec-cmd.h"
 #include "remote.h"
 #include "list-objects.h"
 #include "setup.h"
@@ -17,6 +15,7 @@
 #include "strvec.h"
 #include "tree.h"
 #include "tree-walk.h"
+#include "url.h"
 #include "packfile.h"
 #include "object-store-ll.h"
 #include "commit-reach.h"
@@ -783,7 +782,7 @@ static void handle_new_lock_ctx(struct xml_ctx *ctx, int tag_closed)
 static void one_remote_ref(const char *refname);
 
 static void
-xml_start_tag(void *userData, const char *name, const char **atts)
+xml_start_tag(void *userData, const char *name, const char **atts UNUSED)
 {
 	struct xml_ctx *ctx = (struct xml_ctx *)userData;
 	const char *c = strchr(name, ':');
@@ -1308,7 +1307,7 @@ static struct object_list **process_tree(struct tree *tree,
 	obj->flags |= SEEN;
 	p = add_one_object(obj, p);
 
-	init_tree_desc(&desc, tree->buffer, tree->size);
+	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
 
 	while (tree_entry(&desc, &entry))
 		switch (object_type(entry.mode)) {

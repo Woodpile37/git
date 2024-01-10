@@ -420,9 +420,9 @@ static void prepare_checked_out_branches(void)
 		wt_status_state_free_buffers(&state);
 
 		if (wt_status_check_bisect(wt, &state) &&
-		    state.branch) {
+		    state.bisecting_from) {
 			struct strbuf ref = STRBUF_INIT;
-			strbuf_addf(&ref, "refs/heads/%s", state.branch);
+			strbuf_addf(&ref, "refs/heads/%s", state.bisecting_from);
 			old = strmap_put(&current_checked_out_branches,
 					 ref.buf,
 					 xstrdup(wt->path));
@@ -471,7 +471,7 @@ int validate_new_branchname(const char *name, struct strbuf *ref, int force)
 
 	if ((path = branch_checked_out(ref->buf)))
 		die(_("cannot force update the branch '%s' "
-		      "checked out at '%s'"),
+		      "used by worktree at '%s'"),
 		    ref->buf + strlen("refs/heads/"), path);
 
 	return 1;
@@ -838,7 +838,7 @@ void die_if_checked_out(const char *branch, int ignore_current_worktree)
 
 		if (is_shared_symref(worktrees[i], "HEAD", branch)) {
 			skip_prefix(branch, "refs/heads/", &branch);
-			die(_("'%s' is already checked out at '%s'"),
+			die(_("'%s' is already used by worktree at '%s'"),
 				branch, worktrees[i]->path);
 		}
 	}

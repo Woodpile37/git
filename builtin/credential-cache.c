@@ -3,13 +3,10 @@
 #include "parse-options.h"
 #include "path.h"
 #include "strbuf.h"
-#include "wrapper.h"
 #include "write-or-die.h"
 
 #ifndef NO_UNIX_SOCKETS
 
-#include "credential.h"
-#include "string-list.h"
 #include "unix-socket.h"
 #include "run-command.h"
 

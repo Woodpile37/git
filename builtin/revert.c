@@ -1,6 +1,4 @@
 #include "git-compat-util.h"
-#include "alloc.h"
-#include "config.h"
 #include "builtin.h"
 #include "parse-options.h"
 #include "diff.h"
@@ -8,7 +6,6 @@
 #include "repository.h"
 #include "revision.h"
 #include "rerere.h"
-#include "dir.h"
 #include "sequencer.h"
 #include "branch.h"
 

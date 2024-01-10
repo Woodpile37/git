@@ -1,5 +1,4 @@
 #include "git-compat-util.h"
-#include "alloc.h"
 #include "hex.h"
 #include "repository.h"
 #include "tempfile.h"
@@ -8,7 +7,6 @@
 #include "commit.h"
 #include "tag.h"
 #include "pkt-line.h"
-#include "remote.h"
 #include "refs.h"
 #include "oid-array.h"
 #include "path.h"
@@ -20,7 +18,6 @@
 #include "shallow.h"
 #include "statinfo.h"
 #include "trace.h"
-#include "wrapper.h"
 
 void set_alternate_shallow_file(struct repository *r, const char *path, int override)
 {
@@ -40,8 +37,10 @@ int register_shallow(struct repository *r, const struct object_id *oid)
 
 	oidcpy(&graft->oid, oid);
 	graft->nr_parent = -1;
-	if (commit && commit->object.parsed)
+	if (commit && commit->object.parsed) {
+		free_commit_list(commit->parents);
 		commit->parents = NULL;
+	}
 	return register_commit_graft(r, graft, 0);
 }
 

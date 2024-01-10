@@ -3,9 +3,10 @@
 #include "test-tool-utils.h"
 #include "trace2.h"
 #include "parse-options.h"
+#include "config.h"
 
 static const char * const test_tool_usage[] = {
-	"test-tool [-C <directory>] <command [<arguments>...]]",
+	"test-tool [-C <directory>] [-c <name>=<value>] <command> [<arguments>...]",
 	NULL
 };
 
@@ -19,8 +20,8 @@ static struct test_cmd cmds[] = {
 	{ "config", cmd__config },
 	{ "crontab", cmd__crontab },
 	{ "csprng", cmd__csprng },
-	{ "ctype", cmd__ctype },
 	{ "date", cmd__date },
+	{ "delete-gpgsig", cmd__delete_gpgsig },
 	{ "delta", cmd__delta },
 	{ "dir-iterator", cmd__dir_iterator },
 	{ "drop-caches", cmd__drop_caches },
@@ -30,7 +31,7 @@ static struct test_cmd cmds[] = {
 	{ "dump-untracked-cache", cmd__dump_untracked_cache },
 	{ "env-helper", cmd__env_helper },
 	{ "example-decorate", cmd__example_decorate },
-	{ "fast-rebase", cmd__fast_rebase },
+	{ "find-pack", cmd__find_pack },
 	{ "fsmonitor-client", cmd__fsmonitor_client },
 	{ "genrandom", cmd__genrandom },
 	{ "genzeros", cmd__genzeros },
@@ -38,7 +39,6 @@ static struct test_cmd cmds[] = {
 	{ "hashmap", cmd__hashmap },
 	{ "hash-speed", cmd__hash_speed },
 	{ "hexdump", cmd__hexdump },
-	{ "index-version", cmd__index_version },
 	{ "json-writer", cmd__json_writer },
 	{ "lazy-init-name-hash", cmd__lazy_init_name_hash },
 	{ "match-trees", cmd__match_trees },
@@ -86,6 +86,7 @@ static struct test_cmd cmds[] = {
 	{ "submodule-nested-repo-config", cmd__submodule_nested_repo_config },
 	{ "subprocess", cmd__subprocess },
 	{ "trace2", cmd__trace2 },
+	{ "truncate", cmd__truncate },
 	{ "userdiff", cmd__userdiff },
 	{ "urlmatch-normalization", cmd__urlmatch_normalization },
 	{ "xml-encode", cmd__xml_encode },
@@ -100,10 +101,17 @@ static NORETURN void die_usage(void)
 {
 	size_t i;
 
-	fprintf(stderr, "usage: test-tool <toolname> [args]\n");
+	fprintf(stderr, "usage: %s\n", test_tool_usage[0]);
 	for (i = 0; i < ARRAY_SIZE(cmds); i++)
 		fprintf(stderr, "  %s\n", cmds[i].name);
 	exit(128);
+}
+
+static int parse_config_option(const struct option *opt, const char *arg,
+			       int unset)
+{
+	git_config_push_parameter(arg);
+	return 0;
 }
 
 int cmd_main(int argc, const char **argv)
@@ -113,6 +121,9 @@ int cmd_main(int argc, const char **argv)
 	struct option options[] = {
 		OPT_STRING('C', NULL, &working_directory, "directory",
 			   "change the working directory"),
+		OPT_CALLBACK('c', NULL, NULL, "<name>=<value>",
+			   "pass a configuration parameter to the command",
+			   parse_config_option),
 		OPT_END()
 	};
 

@@ -5,7 +5,6 @@
  */
 #define USE_THE_INDEX_VARIABLE
 #include "builtin.h"
-#include "alloc.h"
 #include "config.h"
 #include "convert.h"
 #include "diff.h"
@@ -16,7 +15,6 @@
 #include "parse-options.h"
 #include "userdiff.h"
 #include "streaming.h"
-#include "tree-walk.h"
 #include "oid-array.h"
 #include "packfile.h"
 #include "object-file.h"
@@ -108,7 +106,10 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 	struct object_info oi = OBJECT_INFO_INIT;
 	struct strbuf sb = STRBUF_INIT;
 	unsigned flags = OBJECT_INFO_LOOKUP_REPLACE;
-	unsigned get_oid_flags = GET_OID_RECORD_PATH | GET_OID_ONLY_TO_DIE;
+	unsigned get_oid_flags =
+		GET_OID_RECORD_PATH |
+		GET_OID_ONLY_TO_DIE |
+		GET_OID_HASH_ANY;
 	const char *path = force_path;
 	const int opt_cw = (opt == 'c' || opt == 'w');
 	if (!path && opt_cw)
@@ -224,7 +225,8 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name,
 								     &size);
 				const char *target;
 				if (!skip_prefix(buffer, "object ", &target) ||
-				    get_oid_hex(target, &blob_oid))
+				    get_oid_hex_algop(target, &blob_oid,
+						      &hash_algos[oid.algo]))
 					die("%s not a valid tag", oid_to_hex(&oid));
 				free(buffer);
 			} else
@@ -309,10 +311,8 @@ static int is_atom(const char *atom, const char *s, int slen)
 }
 
 static void expand_atom(struct strbuf *sb, const char *atom, int len,
-			void *vdata)
+			struct expand_data *data)
 {
-	struct expand_data *data = vdata;
-
 	if (is_atom("objectname", atom, len)) {
 		if (!data->mark_query)
 			strbuf_addstr(sb, oid_to_hex(&data->oid));
@@ -346,19 +346,21 @@ static void expand_atom(struct strbuf *sb, const char *atom, int len,
 		die("unknown format element: %.*s", len, atom);
 }
 
-static size_t expand_format(struct strbuf *sb, const char *start, void *data)
+static void expand_format(struct strbuf *sb, const char *start,
+			  struct expand_data *data)
 {
-	const char *end;
+	while (strbuf_expand_step(sb, &start)) {
+		const char *end;
 
-	if (*start != '(')
-		return 0;
-	end = strchr(start + 1, ')');
-	if (!end)
-		die("format element '%s' does not end in ')'", start);
-
-	expand_atom(sb, start + 1, end - start - 1, data);
-
-	return end - start + 1;
+		if (skip_prefix(start, "%", &start) || *start != '(')
+			strbuf_addch(sb, '%');
+		else if (!(end = strchr(start + 1, ')')))
+			die("format element '%s' does not end in ')'", start);
+		else {
+			expand_atom(sb, start + 1, end - start - 1, data);
+			start = end + 1;
+		}
+	}
 }
 
 static void batch_write(struct batch_options *opt, const void *data, int len)
@@ -495,7 +497,7 @@ static void batch_object_write(const char *obj_name,
 	if (!opt->format) {
 		print_default_format(scratch, data, opt);
 	} else {
-		strbuf_expand(scratch, opt->format, expand_format, data);
+		expand_format(scratch, opt->format, data);
 		strbuf_addch(scratch, opt->output_delim);
 	}
 
@@ -513,7 +515,9 @@ static void batch_one_object(const char *obj_name,
 			     struct expand_data *data)
 {
 	struct object_context ctx;
-	int flags = opt->follow_symlinks ? GET_OID_FOLLOW_SYMLINKS : 0;
+	int flags =
+		GET_OID_HASH_ANY |
+		(opt->follow_symlinks ? GET_OID_FOLLOW_SYMLINKS : 0);
 	enum get_oid_result result;
 
 	result = get_oid_with_context(the_repository, obj_name,
@@ -773,9 +777,8 @@ static int batch_objects(struct batch_options *opt)
 	 */
 	memset(&data, 0, sizeof(data));
 	data.mark_query = 1;
-	strbuf_expand(&output,
+	expand_format(&output,
 		      opt->format ? opt->format : DEFAULT_FORMAT,
-		      expand_format,
 		      &data);
 	data.mark_query = 0;
 	strbuf_release(&output);
@@ -872,12 +875,13 @@ static int batch_objects(struct batch_options *opt)
 	return retval;
 }
 
-static int git_cat_file_config(const char *var, const char *value, void *cb)
+static int git_cat_file_config(const char *var, const char *value,
+			       const struct config_context *ctx, void *cb)
 {
 	if (userdiff_config(var, value) < 0)
 		return -1;
 
-	return git_default_config(var, value, cb);
+	return git_default_config(var, value, ctx, cb);
 }
 
 static int batch_option_callback(const struct option *opt,
@@ -923,11 +927,11 @@ int cmd_cat_file(int argc, const char **argv, const char *prefix)
 		N_("git cat-file <type> <object>"),
 		N_("git cat-file (-e | -p) <object>"),
 		N_("git cat-file (-t | -s) [--allow-unknown-type] <object>"),
+		N_("git cat-file (--textconv | --filters)\n"
+		   "             [<rev>:<path|tree-ish> | --path=<path|tree-ish> <rev>]"),
 		N_("git cat-file (--batch | --batch-check | --batch-command) [--batch-all-objects]\n"
 		   "             [--buffer] [--follow-symlinks] [--unordered]\n"
 		   "             [--textconv | --filters] [-Z]"),
-		N_("git cat-file (--textconv | --filters)\n"
-		   "             [<rev>:<path|tree-ish> | --path=<path|tree-ish> <rev>]"),
 		NULL
 	};
 	const struct option options[] = {

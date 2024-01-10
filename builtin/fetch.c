@@ -26,7 +26,6 @@
 #include "connected.h"
 #include "strvec.h"
 #include "utf8.h"
-#include "packfile.h"
 #include "pager.h"
 #include "path.h"
 #include "pkt-line.h"
@@ -38,7 +37,6 @@
 #include "shallow.h"
 #include "trace.h"
 #include "trace2.h"
-#include "worktree.h"
 #include "bundle-uri.h"
 
 #define FORCED_UPDATES_DELAY_WARNING_IN_MS (10 * 1000)
@@ -102,6 +100,7 @@ static struct string_list negotiation_tip = STRING_LIST_INIT_NODUP;
 
 struct fetch_config {
 	enum display_format display_format;
+	int all;
 	int prune;
 	int prune_tags;
 	int show_forced_updates;
@@ -110,9 +109,15 @@ struct fetch_config {
 	int submodule_fetch_jobs;
 };
 
-static int git_fetch_config(const char *k, const char *v, void *cb)
+static int git_fetch_config(const char *k, const char *v,
+			    const struct config_context *ctx, void *cb)
 {
 	struct fetch_config *fetch_config = cb;
+
+	if (!strcmp(k, "fetch.all")) {
+		fetch_config->all = git_config_bool(k, v);
+		return 0;
+	}
 
 	if (!strcmp(k, "fetch.prune")) {
 		fetch_config->prune = git_config_bool(k, v);
@@ -136,7 +141,7 @@ static int git_fetch_config(const char *k, const char *v, void *cb)
 	}
 
 	if (!strcmp(k, "submodule.fetchjobs")) {
-		fetch_config->submodule_fetch_jobs = parse_submodule_fetchjobs(k, v);
+		fetch_config->submodule_fetch_jobs = parse_submodule_fetchjobs(k, v, ctx->kvi);
 		return 0;
 	} else if (!strcmp(k, "fetch.recursesubmodules")) {
 		fetch_config->recurse_submodules = parse_fetch_recurse_submodules_arg(k, v);
@@ -144,7 +149,7 @@ static int git_fetch_config(const char *k, const char *v, void *cb)
 	}
 
 	if (!strcmp(k, "fetch.parallel")) {
-		fetch_config->parallel = git_config_int(k, v);
+		fetch_config->parallel = git_config_int(k, v, ctx->kvi);
 		if (fetch_config->parallel < 0)
 			die(_("fetch.parallel cannot be negative"));
 		if (!fetch_config->parallel)
@@ -164,7 +169,7 @@ static int git_fetch_config(const char *k, const char *v, void *cb)
 			    "fetch.output", v);
 	}
 
-	return git_default_config(k, v, cb);
+	return git_default_config(k, v, ctx, cb);
 }
 
 static int parse_refmap_arg(const struct option *opt, const char *arg, int unset)
@@ -175,7 +180,7 @@ static int parse_refmap_arg(const struct option *opt, const char *arg, int unset
 	 * "git fetch --refmap='' origin foo"
 	 * can be used to tell the command not to store anywhere
 	 */
-	refspec_append(&refmap, arg);
+	refspec_append(opt->value, arg);
 
 	return 0;
 }
@@ -307,7 +312,7 @@ static void clear_item(struct refname_hash_entry *item)
 
 
 static void add_already_queued_tags(const char *refname,
-				    const struct object_id *old_oid,
+				    const struct object_id *old_oid UNUSED,
 				    const struct object_id *new_oid,
 				    void *cb_data)
 {
@@ -1650,7 +1655,7 @@ static int do_fetch(struct transport *transport,
 	if (atomic_fetch) {
 		transaction = ref_transaction_begin(&err);
 		if (!transaction) {
-			retcode = error("%s", err.buf);
+			retcode = -1;
 			goto cleanup;
 		}
 	}
@@ -1710,7 +1715,6 @@ static int do_fetch(struct transport *transport,
 
 		retcode = ref_transaction_commit(transaction, &err);
 		if (retcode) {
-			error("%s", err.buf);
 			ref_transaction_free(transaction);
 			transaction = NULL;
 			goto cleanup;
@@ -1774,9 +1778,14 @@ static int do_fetch(struct transport *transport,
 	}
 
 cleanup:
-	if (retcode && transaction) {
-		ref_transaction_abort(transaction, &err);
-		error("%s", err.buf);
+	if (retcode) {
+		if (err.len) {
+			error("%s", err.buf);
+			strbuf_reset(&err);
+		}
+		if (transaction && ref_transaction_abort(transaction, &err) &&
+		    err.len)
+			error("%s", err.buf);
 	}
 
 	display_state_release(&display_state);
@@ -1799,7 +1808,9 @@ struct remote_group_data {
 	struct string_list *list;
 };
 
-static int get_remote_group(const char *key, const char *value, void *priv)
+static int get_remote_group(const char *key, const char *value,
+			    const struct config_context *ctx UNUSED,
+			    void *priv)
 {
 	struct remote_group_data *g = priv;
 
@@ -2125,7 +2136,7 @@ int cmd_fetch(int argc, const char **argv, const char *prefix)
 	const char *bundle_uri;
 	struct string_list list = STRING_LIST_INIT_DUP;
 	struct remote *remote = NULL;
-	int all = 0, multiple = 0;
+	int all = -1, multiple = 0;
 	int result = 0;
 	int prune_tags_ok = 1;
 	int enable_auto_gc = 1;
@@ -2201,13 +2212,10 @@ int cmd_fetch(int argc, const char **argv, const char *prefix)
 			   PARSE_OPT_HIDDEN, option_fetch_parse_recurse_submodules),
 		OPT_BOOL(0, "update-shallow", &update_shallow,
 			 N_("accept refs that update .git/shallow")),
-		OPT_CALLBACK_F(0, "refmap", NULL, N_("refmap"),
+		OPT_CALLBACK_F(0, "refmap", &refmap, N_("refmap"),
 			       N_("specify fetch refmap"), PARSE_OPT_NONEG, parse_refmap_arg),
 		OPT_STRING_LIST('o', "server-option", &server_options, N_("server-specific"), N_("option to transmit")),
-		OPT_SET_INT('4', "ipv4", &family, N_("use IPv4 addresses only"),
-				TRANSPORT_FAMILY_IPV4),
-		OPT_SET_INT('6', "ipv6", &family, N_("use IPv6 addresses only"),
-				TRANSPORT_FAMILY_IPV6),
+		OPT_IPVERSION(&family),
 		OPT_STRING_LIST(0, "negotiation-tip", &negotiation_tip, N_("revision"),
 				N_("report that we have only objects reachable from this object")),
 		OPT_BOOL(0, "negotiate-only", &negotiate_only,
@@ -2333,11 +2341,20 @@ int cmd_fetch(int argc, const char **argv, const char *prefix)
 	    fetch_bundle_uri(the_repository, bundle_uri, NULL))
 		warning(_("failed to fetch bundles from '%s'"), bundle_uri);
 
+	if (all < 0) {
+		/*
+		 * no --[no-]all given;
+		 * only use config option if no remote was explicitly specified
+		 */
+		all = (!argc) ? config.all : 0;
+	}
+
 	if (all) {
 		if (argc == 1)
 			die(_("fetch --all does not take a repository argument"));
 		else if (argc > 1)
 			die(_("fetch --all does not make sense with refspecs"));
+
 		(void) for_each_remote(get_one_remote_for_fetch, &list);
 
 		/* do not do fetch_multiple() of one */

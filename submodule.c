@@ -1,6 +1,5 @@
 #include "git-compat-util.h"
 #include "abspath.h"
-#include "alloc.h"
 #include "repository.h"
 #include "config.h"
 #include "submodule-config.h"
@@ -18,10 +17,8 @@
 #include "string-list.h"
 #include "oid-array.h"
 #include "strvec.h"
-#include "blob.h"
 #include "thread-utils.h"
 #include "path.h"
-#include "quote.h"
 #include "remote.h"
 #include "worktree.h"
 #include "parse-options.h"
@@ -31,7 +28,6 @@
 #include "commit-reach.h"
 #include "read-cache-ll.h"
 #include "setup.h"
-#include "shallow.h"
 #include "trace2.h"
 
 static int config_update_recurse_submodules = RECURSE_SUBMODULES_OFF;

@@ -132,6 +132,7 @@ extern size_t packed_git_limit;
 extern size_t delta_base_cache_limit;
 extern unsigned long big_file_threshold;
 extern unsigned long pack_size_limit_cfg;
+extern int max_allowed_tree_depth;
 
 /*
  * Accessors for the core.sharedrepository config which lazy-load the value
@@ -193,7 +194,7 @@ extern enum object_creation_mode object_creation_mode;
 
 extern char *notes_ref_name;
 
-extern int grafts_replace_parents;
+extern int grafts_keep_true_parents;
 
 extern int repository_format_precious_objects;
 

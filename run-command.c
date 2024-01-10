@@ -14,9 +14,7 @@
 #include "quote.h"
 #include "config.h"
 #include "packfile.h"
-#include "hook.h"
 #include "compat/nonblock.h"
-#include "alloc.h"
 
 void child_process_init(struct child_process *child)
 {
@@ -170,6 +168,7 @@ int is_executable(const char *name)
 	return st.st_mode & S_IXUSR;
 }
 
+#ifndef locate_in_PATH
 /*
  * Search $PATH for a command.  This emulates the path search that
  * execvp would perform, without actually executing the command so it
@@ -218,6 +217,7 @@ static char *locate_in_PATH(const char *file)
 	strbuf_release(&buf);
 	return NULL;
 }
+#endif
 
 int exists_in_PATH(const char *command)
 {

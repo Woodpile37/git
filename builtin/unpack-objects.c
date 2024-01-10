@@ -10,11 +10,8 @@
 #include "delta.h"
 #include "pack.h"
 #include "blob.h"
-#include "commit.h"
 #include "replace-object.h"
-#include "tag.h"
-#include "tree.h"
-#include "tree-walk.h"
+#include "strbuf.h"
 #include "progress.h"
 #include "decorate.h"
 #include "fsck.h"
@@ -214,7 +211,8 @@ static void write_cached_object(struct object *obj, struct obj_buffer *obj_buf)
  * Verify its reachability and validity recursively and write it out.
  */
 static int check_object(struct object *obj, enum object_type type,
-			void *data, struct fsck_options *options)
+			void *data UNUSED,
+			struct fsck_options *options UNUSED)
 {
 	struct obj_buffer *obj_buf;
 
@@ -607,6 +605,7 @@ int cmd_unpack_objects(int argc, const char **argv, const char *prefix UNUSED)
 {
 	int i;
 	struct object_id oid;
+	git_hash_ctx tmp_ctx;
 
 	disable_replace_refs();
 
@@ -667,7 +666,9 @@ int cmd_unpack_objects(int argc, const char **argv, const char *prefix UNUSED)
 	the_hash_algo->init_fn(&ctx);
 	unpack_all();
 	the_hash_algo->update_fn(&ctx, buffer, offset);
-	the_hash_algo->final_oid_fn(&oid, &ctx);
+	the_hash_algo->init_fn(&tmp_ctx);
+	the_hash_algo->clone_fn(&tmp_ctx, &ctx);
+	the_hash_algo->final_oid_fn(&oid, &tmp_ctx);
 	if (strict) {
 		write_rest();
 		if (fsck_finish(&fsck_options))

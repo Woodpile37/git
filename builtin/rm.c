@@ -5,12 +5,10 @@
  */
 #define USE_THE_INDEX_VARIABLE
 #include "builtin.h"
-#include "alloc.h"
 #include "advice.h"
 #include "config.h"
 #include "lockfile.h"
 #include "dir.h"
-#include "cache-tree.h"
 #include "gettext.h"
 #include "hash.h"
 #include "tree-walk.h"

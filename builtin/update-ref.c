@@ -7,7 +7,6 @@
 #include "parse-options.h"
 #include "quote.h"
 #include "repository.h"
-#include "strvec.h"
 
 static const char * const git_update_ref_usage[] = {
 	N_("git update-ref [<options>] -d <refname> [<old-val>]"),
@@ -311,8 +310,8 @@ static void report_ok(const char *command)
 	fflush(stdout);
 }
 
-static void parse_cmd_option(struct ref_transaction *transaction,
-			     const char *next, const char *end)
+static void parse_cmd_option(struct ref_transaction *transaction UNUSED,
+			     const char *next, const char *end UNUSED)
 {
 	const char *rest;
 	if (skip_prefix(next, "no-deref", &rest) && *rest == line_termination)
@@ -321,8 +320,8 @@ static void parse_cmd_option(struct ref_transaction *transaction,
 		die("option unknown: %s", next);
 }
 
-static void parse_cmd_start(struct ref_transaction *transaction,
-			    const char *next, const char *end)
+static void parse_cmd_start(struct ref_transaction *transaction UNUSED,
+			    const char *next, const char *end UNUSED)
 {
 	if (*next != line_termination)
 		die("start: extra input: %s", next);
@@ -330,7 +329,7 @@ static void parse_cmd_start(struct ref_transaction *transaction,
 }
 
 static void parse_cmd_prepare(struct ref_transaction *transaction,
-			      const char *next, const char *end)
+			      const char *next, const char *end UNUSED)
 {
 	struct strbuf error = STRBUF_INIT;
 	if (*next != line_termination)
@@ -341,7 +340,7 @@ static void parse_cmd_prepare(struct ref_transaction *transaction,
 }
 
 static void parse_cmd_abort(struct ref_transaction *transaction,
-			    const char *next, const char *end)
+			    const char *next, const char *end UNUSED)
 {
 	struct strbuf error = STRBUF_INIT;
 	if (*next != line_termination)
@@ -352,7 +351,7 @@ static void parse_cmd_abort(struct ref_transaction *transaction,
 }
 
 static void parse_cmd_commit(struct ref_transaction *transaction,
-			     const char *next, const char *end)
+			     const char *next, const char *end UNUSED)
 {
 	struct strbuf error = STRBUF_INIT;
 	if (*next != line_termination)

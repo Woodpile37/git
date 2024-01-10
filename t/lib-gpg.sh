@@ -13,7 +13,7 @@ test_lazy_prereq GPG '
 	gpg_version=$(gpg --version 2>&1)
 	test $? != 127 || exit 1
 
-	# As said here: http://www.gnupg.org/documentation/faqs.html#q6.19
+	# As said here: https://web.archive.org/web/20130212022238/https://www.gnupg.org/faq/gnupg-faq.html#why-does-gnupg-1.0.6-bail-out-on-keyrings-used-with-1.0.7
 	# the gpg version 1.0.6 did not parse trust packets correctly, so for
 	# that version, creation of signed tags using the generated key fails.
 	case "$gpg_version" in
@@ -40,6 +40,28 @@ test_lazy_prereq GPG '
 		#		> lib-gpg/ownertrust
 		mkdir "$GNUPGHOME" &&
 		chmod 0700 "$GNUPGHOME" &&
+		(gpgconf --kill all || : ) &&
+		gpg --homedir "${GNUPGHOME}" --import \
+			"$TEST_DIRECTORY"/lib-gpg/keyring.gpg &&
+		gpg --homedir "${GNUPGHOME}" --import-ownertrust \
+			"$TEST_DIRECTORY"/lib-gpg/ownertrust &&
+		gpg --homedir "${GNUPGHOME}" --update-trustdb &&
+		gpg --homedir "${GNUPGHOME}" </dev/null >/dev/null \
+			--sign -u committer@example.com
+		;;
+	esac
+'
+
+test_lazy_prereq GPG2 '
+	gpg_version=$(gpg --version 2>&1)
+	test $? != 127 || exit 1
+
+	case "$gpg_version" in
+	"gpg (GnuPG) "[01].*)
+		say "This test requires a GPG version >= v2.0.0"
+		exit 1
+		;;
+	*)
 		(gpgconf --kill all || : ) &&
 		gpg --homedir "${GNUPGHOME}" --import \
 			"$TEST_DIRECTORY"/lib-gpg/keyring.gpg &&

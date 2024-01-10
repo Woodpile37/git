@@ -1,5 +1,4 @@
 #include "git-compat-util.h"
-#include "alloc.h"
 #include "environment.h"
 #include "gettext.h"
 #include "name-hash.h"
@@ -392,7 +391,7 @@ void expand_index(struct index_state *istate, struct pattern_list *pl)
 		strbuf_setlen(&base, 0);
 		strbuf_add(&base, ce->name, strlen(ce->name));
 
-		read_tree_at(istate->repo, tree, &base, &ps,
+		read_tree_at(istate->repo, tree, &base, 0, &ps,
 			     add_path_to_index, &ctx);
 
 		/* free directory entries. full entries are re-used */

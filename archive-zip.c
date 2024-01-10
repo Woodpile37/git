@@ -10,6 +10,7 @@
 #include "streaming.h"
 #include "utf8.h"
 #include "object-store-ll.h"
+#include "strbuf.h"
 #include "userdiff.h"
 #include "write-or-die.h"
 #include "xdiff-interface.h"
@@ -617,6 +618,7 @@ static void dos_time(timestamp_t *timestamp, int *dos_date, int *dos_time)
 }
 
 static int archive_zip_config(const char *var, const char *value,
+			      const struct config_context *ctx UNUSED,
 			      void *data UNUSED)
 {
 	return userdiff_config(var, value);

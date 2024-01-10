@@ -1,20 +1,19 @@
 #include "git-compat-util.h"
-#include "cache-tree.h"
 #include "hex.h"
 #include "tree.h"
 #include "object-name.h"
 #include "object-store-ll.h"
-#include "blob.h"
 #include "commit.h"
-#include "tag.h"
 #include "alloc.h"
 #include "tree-walk.h"
 #include "repository.h"
+#include "environment.h"
 
 const char *tree_type = "tree";
 
 int read_tree_at(struct repository *r,
 		 struct tree *tree, struct strbuf *base,
+		 int depth,
 		 const struct pathspec *pathspec,
 		 read_tree_fn_t fn, void *context)
 {
@@ -24,15 +23,18 @@ int read_tree_at(struct repository *r,
 	int len, oldlen = base->len;
 	enum interesting retval = entry_not_interesting;
 
+	if (depth > max_allowed_tree_depth)
+		return error("exceeded maximum allowed tree depth");
+
 	if (parse_tree(tree))
 		return -1;
 
-	init_tree_desc(&desc, tree->buffer, tree->size);
+	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
 
 	while (tree_entry(&desc, &entry)) {
 		if (retval != all_entries_interesting) {
 			retval = tree_entry_interesting(r->index, &entry,
-							base, 0, pathspec);
+							base, pathspec);
 			if (retval == all_entries_not_interesting)
 				break;
 			if (retval == entry_not_interesting)
@@ -74,7 +76,7 @@ int read_tree_at(struct repository *r,
 		strbuf_add(base, entry.path, len);
 		strbuf_addch(base, '/');
 		retval = read_tree_at(r, lookup_tree(r, &oid),
-				      base, pathspec,
+				      base, depth + 1, pathspec,
 				      fn, context);
 		strbuf_setlen(base, oldlen);
 		if (retval)
@@ -89,7 +91,7 @@ int read_tree(struct repository *r,
 	      read_tree_fn_t fn, void *context)
 {
 	struct strbuf sb = STRBUF_INIT;
-	int ret = read_tree_at(r, tree, &sb, pathspec, fn, context);
+	int ret = read_tree_at(r, tree, &sb, 0, pathspec, fn, context);
 	strbuf_release(&sb);
 	return ret;
 }

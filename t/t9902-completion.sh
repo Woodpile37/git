@@ -1571,7 +1571,7 @@ test_expect_success FUNNYNAMES,!CYGWIN 'cone mode sparse-checkout completes dire
 	)
 '
 
-test_expect_success 'non-cone mode sparse-checkout uses bash completion' '
+test_expect_success 'non-cone mode sparse-checkout gives rooted paths' '
 	# reset sparse-checkout repo to non-cone mode
 	git -C sparse-checkout sparse-checkout disable &&
 	git -C sparse-checkout sparse-checkout set --no-cone &&
@@ -1581,7 +1581,12 @@ test_expect_success 'non-cone mode sparse-checkout uses bash completion' '
 		# expected to be empty since we have not configured
 		# custom completion for non-cone mode
 		test_completion "git sparse-checkout set f" <<-\EOF
-
+		/folder1/0/1/t.txt Z
+		/folder1/expected Z
+		/folder1/out Z
+		/folder1/out_sorted Z
+		/folder2/0/t.txt Z
+		/folder3/t.txt Z
 		EOF
 	)
 '
@@ -1622,14 +1627,22 @@ test_expect_success 'git checkout - with -d, complete only references' '
 '
 
 test_expect_success 'git switch - with --track, complete only remote branches' '
-	test_completion "git switch --track " <<-\EOF
+	test_completion "git switch --track " <<-\EOF &&
+	other/branch-in-other Z
+	other/main-in-other Z
+	EOF
+	test_completion "git switch -t " <<-\EOF
 	other/branch-in-other Z
 	other/main-in-other Z
 	EOF
 '
 
 test_expect_success 'git checkout - with --track, complete only remote branches' '
-	test_completion "git checkout --track " <<-\EOF
+	test_completion "git checkout --track " <<-\EOF &&
+	other/branch-in-other Z
+	other/main-in-other Z
+	EOF
+	test_completion "git checkout -t " <<-\EOF
 	other/branch-in-other Z
 	other/main-in-other Z
 	EOF
@@ -2449,6 +2462,24 @@ test_expect_success 'completion uses <cmd> completion for alias: !f () { VAR=val
 
 test_expect_success 'completion used <cmd> completion for alias: !f() { : git <cmd> ; ... }' '
 	test_config alias.co "!f() { : git checkout ; if ... } f" &&
+	test_completion "git co m" <<-\EOF
+	main Z
+	mybranch Z
+	mytag Z
+	EOF
+'
+
+test_expect_success 'completion used <cmd> completion for alias: !f() { : <cmd> ; ... }' '
+	test_config alias.co "!f() { : checkout ; if ... } f" &&
+	test_completion "git co m" <<-\EOF
+	main Z
+	mybranch Z
+	mytag Z
+	EOF
+'
+
+test_expect_success 'completion used <cmd> completion for alias: !f() { : <cmd>; ... }' '
+	test_config alias.co "!f() { : checkout; if ... } f" &&
 	test_completion "git co m" <<-\EOF
 	main Z
 	mybranch Z
