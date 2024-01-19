@@ -843,7 +843,7 @@ int is_per_worktree_ref(const char *refname)
 	       starts_with(refname, "refs/rewritten/");
 }
 
-static int is_pseudoref_syntax(const char *refname)
+int is_pseudoref_syntax(const char *refname)
 {
 	const char *c;
 

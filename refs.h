@@ -849,6 +849,12 @@ const char **hidden_refs_to_excludes(const struct strvec *hide_refs);
 /* Is this a per-worktree ref living in the refs/ namespace? */
 int is_per_worktree_ref(const char *refname);
 
+/*
+ * Check whether a refname matches the pseudoref syntax. This is a surface
+ * level check and can present false positives.
+ */
+int is_pseudoref_syntax(const char *refname);
+
 /* Describes how a refname relates to worktrees */
 enum ref_worktree_type {
 	REF_WORKTREE_CURRENT, /* implicitly per worktree, eg. HEAD or
