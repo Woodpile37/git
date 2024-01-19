@@ -845,6 +845,14 @@ int is_per_worktree_ref(const char *refname)
 
 int is_pseudoref_syntax(const char *refname)
 {
+	/* TODO: move these pseudorefs to have _HEAD suffix */
+	static const char *const irregular_pseudorefs[] = {
+		"BISECT_EXPECTED_REV",
+		"NOTES_MERGE_PARTIAL",
+		"NOTES_MERGE_REF",
+		"AUTO_MERGE"
+	};
+	size_t i;
 	const char *c;
 
 	for (c = refname; *c; c++) {
@@ -853,10 +861,17 @@ int is_pseudoref_syntax(const char *refname)
 	}
 
 	/*
-	 * HEAD is not a pseudoref, but it certainly uses the
-	 * pseudoref syntax.
+	 * Most pseudorefs end with _HEAD. HEAD itself is not a
+	 * pseudoref, but it certainly uses the pseudoref syntax.
 	 */
-	return 1;
+	if (ends_with(refname, "HEAD"))
+		return 1;
+
+	for (i = 0; i < ARRAY_SIZE(irregular_pseudorefs); i++)
+		if (!strcmp(refname, irregular_pseudorefs[i]))
+			return 1;
+
+	return 0;
 }
 
 static int is_current_worktree_ref(const char *ref) {
