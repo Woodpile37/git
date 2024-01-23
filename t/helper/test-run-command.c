@@ -460,6 +460,12 @@ int cmd__run_command(int argc, const char **argv)
 		opts.duplicate_output = duplicate_output;
 	}
 
+	if (!strcmp(argv[1], "--ungroup")) {
+		argv += 1;
+		argc -= 1;
+		run_processes_parallel_ungroup = 1;
+	}
+
 	jobs = atoi(argv[2]);
 	strvec_clear(&proc.args);
 	strvec_pushv(&proc.args, (const char **)argv + 3);

@@ -2,7 +2,7 @@
 #define MERGE_ORT_H
 
 #include "merge-recursive.h"
-#include "hash-ll.h"
+#include "hash.h"
 
 struct commit;
 struct tree;
@@ -28,7 +28,7 @@ struct merge_result {
 	/*
 	 * Special messages and conflict notices for various paths
 	 *
-	 * This is a map of pathnames to a string_list. It contains various
+	 * This is a map of pathnames to strbufs.  It contains various
 	 * warning/conflict/notice messages (possibly multiple per path)
 	 * that callers may want to use.
 	 */
@@ -87,7 +87,6 @@ void merge_switch_to_result(struct merge_options *opt,
  * so only call this when bypassing merge_switch_to_result().
  */
 void merge_display_update_messages(struct merge_options *opt,
-				   int detailed,
 				   struct merge_result *result);
 
 struct stage_info {

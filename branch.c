@@ -1,22 +1,15 @@
 #include "git-compat-util.h"
-#include "advice.h"
+#include "cache.h"
 #include "config.h"
 #include "branch.h"
-#include "environment.h"
-#include "gettext.h"
-#include "hex.h"
-#include "object-name.h"
-#include "path.h"
 #include "refs.h"
 #include "refspec.h"
 #include "remote.h"
-#include "repository.h"
 #include "sequencer.h"
 #include "commit.h"
 #include "worktree.h"
 #include "submodule-config.h"
 #include "run-command.h"
-#include "strmap.h"
 
 struct tracking {
 	struct refspec_item spec;
@@ -38,7 +31,7 @@ static int find_tracked_branch(struct remote *remote, void *priv)
 	if (!remote_find_tracking(remote, &tracking->spec)) {
 		switch (++tracking->matches) {
 		case 1:
-			string_list_append_nodup(tracking->srcs, tracking->spec.src);
+			string_list_append(tracking->srcs, tracking->spec.src);
 			tracking->remote = remote->name;
 			break;
 		case 2:
@@ -234,7 +227,7 @@ static int inherit_tracking(struct tracking *tracking, const char *orig_ref)
 		return -1;
 	}
 
-	tracking->remote = branch->remote_name;
+	tracking->remote = xstrdup(branch->remote_name);
 	for (i = 0; i < branch->merge_nr; i++)
 		string_list_append(tracking->srcs, branch->merge_name[i]);
 	return 0;
@@ -334,7 +327,7 @@ static void setup_tracking(const char *new_ref, const char *orig_ref,
 		if (!skip_prefix(tracking.srcs->items[0].string,
 				 "refs/heads/", &tracked_branch) ||
 		    strcmp(tracked_branch, new_ref))
-			goto cleanup;
+			return;
 	}
 
 	if (tracking.srcs->nr < 1)
@@ -376,81 +369,17 @@ int validate_branchname(const char *name, struct strbuf *ref)
 	return ref_exists(ref->buf);
 }
 
-static int initialized_checked_out_branches;
-static struct strmap current_checked_out_branches = STRMAP_INIT;
-
-static void prepare_checked_out_branches(void)
+int branch_checked_out(const char *refname, char **path)
 {
-	int i = 0;
-	struct worktree **worktrees;
+	struct worktree **worktrees = get_worktrees();
+	const struct worktree *wt = find_shared_symref(worktrees, "HEAD", refname);
+	int result = wt && !wt->is_bare;
 
-	if (initialized_checked_out_branches)
-		return;
-	initialized_checked_out_branches = 1;
-
-	worktrees = get_worktrees();
-
-	while (worktrees[i]) {
-		char *old;
-		struct wt_status_state state = { 0 };
-		struct worktree *wt = worktrees[i++];
-		struct string_list update_refs = STRING_LIST_INIT_DUP;
-
-		if (wt->is_bare)
-			continue;
-
-		if (wt->head_ref) {
-			old = strmap_put(&current_checked_out_branches,
-					 wt->head_ref,
-					 xstrdup(wt->path));
-			free(old);
-		}
-
-		if (wt_status_check_rebase(wt, &state) &&
-		    (state.rebase_in_progress || state.rebase_interactive_in_progress) &&
-		    state.branch) {
-			struct strbuf ref = STRBUF_INIT;
-			strbuf_addf(&ref, "refs/heads/%s", state.branch);
-			old = strmap_put(&current_checked_out_branches,
-					 ref.buf,
-					 xstrdup(wt->path));
-			free(old);
-			strbuf_release(&ref);
-		}
-		wt_status_state_free_buffers(&state);
-
-		if (wt_status_check_bisect(wt, &state) &&
-		    state.bisecting_from) {
-			struct strbuf ref = STRBUF_INIT;
-			strbuf_addf(&ref, "refs/heads/%s", state.bisecting_from);
-			old = strmap_put(&current_checked_out_branches,
-					 ref.buf,
-					 xstrdup(wt->path));
-			free(old);
-			strbuf_release(&ref);
-		}
-		wt_status_state_free_buffers(&state);
-
-		if (!sequencer_get_update_refs_state(get_worktree_git_dir(wt),
-						     &update_refs)) {
-			struct string_list_item *item;
-			for_each_string_list_item(item, &update_refs) {
-				old = strmap_put(&current_checked_out_branches,
-						 item->string,
-						 xstrdup(wt->path));
-				free(old);
-			}
-			string_list_clear(&update_refs, 1);
-		}
-	}
+	if (result && path)
+		*path = xstrdup(wt->path);
 
 	free_worktrees(worktrees);
-}
-
-const char *branch_checked_out(const char *refname)
-{
-	prepare_checked_out_branches();
-	return strmap_get(&current_checked_out_branches, refname);
+	return result;
 }
 
 /*
@@ -461,7 +390,7 @@ const char *branch_checked_out(const char *refname)
  */
 int validate_new_branchname(const char *name, struct strbuf *ref, int force)
 {
-	const char *path;
+	char *path;
 	if (!validate_branchname(name, ref))
 		return 0;
 
@@ -469,9 +398,9 @@ int validate_new_branchname(const char *name, struct strbuf *ref, int force)
 		die(_("a branch named '%s' already exists"),
 		    ref->buf + strlen("refs/heads/"));
 
-	if ((path = branch_checked_out(ref->buf)))
+	if (branch_checked_out(ref->buf, &path))
 		die(_("cannot force update the branch '%s' "
-		      "used by worktree at '%s'"),
+		      "checked out at '%s'"),
 		    ref->buf + strlen("refs/heads/"), path);
 
 	return 1;
@@ -481,12 +410,9 @@ static int check_tracking_branch(struct remote *remote, void *cb_data)
 {
 	char *tracking_branch = cb_data;
 	struct refspec_item query;
-	int res;
 	memset(&query, 0, sizeof(struct refspec_item));
 	query.dst = tracking_branch;
-	res = !remote_find_tracking(remote, &query);
-	free(query.src);
-	return res;
+	return !remote_find_tracking(remote, &query);
 }
 
 static int validate_remote_tracking_branch(char *ref)
@@ -540,7 +466,7 @@ static void dwim_branch_start(struct repository *r, const char *start_name,
 		explicit_tracking = 1;
 
 	real_ref = NULL;
-	if (repo_get_oid_mb(r, start_name, &oid)) {
+	if (get_oid_mb(start_name, &oid)) {
 		if (explicit_tracking) {
 			int code = die_message(_(upstream_missing), start_name);
 			advise_if_enabled(ADVICE_SET_UPSTREAM_FAILURE,
@@ -550,8 +476,7 @@ static void dwim_branch_start(struct repository *r, const char *start_name,
 		die(_("not a valid object name: '%s'"), start_name);
 	}
 
-	switch (repo_dwim_ref(r, start_name, strlen(start_name), &oid,
-			      &real_ref, 0)) {
+	switch (dwim_ref(start_name, strlen(start_name), &oid, &real_ref, 0)) {
 	case 0:
 		/* Not branching from any existing branch */
 		if (explicit_tracking)
@@ -642,10 +567,9 @@ void dwim_and_setup_tracking(struct repository *r, const char *new_ref,
 			     const char *orig_ref, enum branch_track track,
 			     int quiet)
 {
-	char *real_orig_ref = NULL;
+	char *real_orig_ref;
 	dwim_branch_start(r, orig_ref, track, &real_orig_ref, NULL);
 	setup_tracking(new_ref, real_orig_ref, track, quiet);
-	free(real_orig_ref);
 }
 
 /**
@@ -767,7 +691,7 @@ void create_branches_recursively(struct repository *r, const char *name,
 				_("submodule '%s': unable to find submodule"),
 				submodule_entry_list.entries[i].submodule->name);
 			if (advice_enabled(ADVICE_SUBMODULES_NOT_UPDATED))
-				advise(_("You may try updating the submodules using 'git checkout --no-recurse-submodules %s && git submodule update --init'"),
+				advise(_("You may try updating the submodules using 'git checkout %s && git submodule update --init'"),
 				       start_commitish);
 			exit(code);
 		}
@@ -783,7 +707,7 @@ void create_branches_recursively(struct repository *r, const char *name,
 			    name);
 	}
 
-	create_branch(r, name, start_commitish, force, 0, reflog, quiet,
+	create_branch(the_repository, name, start_commitish, force, 0, reflog, quiet,
 		      BRANCH_TRACK_NEVER, dry_run);
 	if (dry_run)
 		return;
@@ -831,17 +755,40 @@ void remove_branch_state(struct repository *r, int verbose)
 void die_if_checked_out(const char *branch, int ignore_current_worktree)
 {
 	struct worktree **worktrees = get_worktrees();
+	const struct worktree *wt;
 
-	for (int i = 0; worktrees[i]; i++) {
-		if (worktrees[i]->is_current && ignore_current_worktree)
-			continue;
-
-		if (is_shared_symref(worktrees[i], "HEAD", branch)) {
-			skip_prefix(branch, "refs/heads/", &branch);
-			die(_("'%s' is already used by worktree at '%s'"),
-				branch, worktrees[i]->path);
-		}
+	wt = find_shared_symref(worktrees, "HEAD", branch);
+	if (wt && (!ignore_current_worktree || !wt->is_current)) {
+		skip_prefix(branch, "refs/heads/", &branch);
+		die(_("'%s' is already checked out at '%s'"), branch, wt->path);
 	}
 
 	free_worktrees(worktrees);
+}
+
+int replace_each_worktree_head_symref(const char *oldref, const char *newref,
+				      const char *logmsg)
+{
+	int ret = 0;
+	struct worktree **worktrees = get_worktrees();
+	int i;
+
+	for (i = 0; worktrees[i]; i++) {
+		struct ref_store *refs;
+
+		if (worktrees[i]->is_detached)
+			continue;
+		if (!worktrees[i]->head_ref)
+			continue;
+		if (strcmp(oldref, worktrees[i]->head_ref))
+			continue;
+
+		refs = get_worktree_ref_store(worktrees[i]);
+		if (refs_create_symref(refs, "HEAD", newref, logmsg))
+			ret = error(_("HEAD of working tree %s is not updated"),
+				    worktrees[i]->path);
+	}
+
+	free_worktrees(worktrees);
+	return ret;
 }

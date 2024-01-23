@@ -1,12 +1,11 @@
 #ifndef SEQUENCER_H
 #define SEQUENCER_H
 
+#include "cache.h"
 #include "strbuf.h"
-#include "strvec.h"
 #include "wt-status.h"
 
 struct commit;
-struct index_state;
 struct repository;
 
 const char *git_path_commit_editmsg(void);
@@ -61,10 +60,8 @@ struct replay_opts {
 	/* Merge strategy */
 	char *default_strategy;  /* from config options */
 	char *strategy;
-	struct strvec xopts;
-
-	/* Reflog */
-	char *reflog_action;
+	char **xopts;
+	size_t xopts_nr, xopts_alloc;
 
 	/* Used by fixup/squash */
 	struct strbuf current_fixups;
@@ -76,16 +73,8 @@ struct replay_opts {
 
 	/* Only used by REPLAY_NONE */
 	struct rev_info *revs;
-
-	/* Private use */
-	const char *reflog_message;
 };
-#define REPLAY_OPTS_INIT {			\
-	.edit = -1,				\
-	.action = -1,				\
-	.current_fixups = STRBUF_INIT,		\
-	.xopts = STRVEC_INIT,			\
-}
+#define REPLAY_OPTS_INIT { .edit = -1, .action = -1, .current_fixups = STRBUF_INIT }
 
 /*
  * Note that ordering matters in this enum. Not only must it match the mapping
@@ -107,7 +96,6 @@ enum todo_command {
 	TODO_LABEL,
 	TODO_RESET,
 	TODO_MERGE,
-	TODO_UPDATE_REF,
 	/* commands that do nothing but are counted for reporting progress */
 	TODO_NOOP,
 	TODO_DROP,
@@ -144,18 +132,6 @@ void todo_list_release(struct todo_list *todo_list);
 const char *todo_item_get_arg(struct todo_list *todo_list,
 			      struct todo_item *item);
 
-/*
- * Parse the update-refs file for the current rebase, then remove the
- * refs that do not appear in the todo_list (and have not had updated
- * values stored) and add refs that are in the todo_list but not
- * represented in the update-refs file.
- *
- * If there are changes to the update-refs list, then write the new state
- * to disk.
- */
-void todo_list_filter_update_refs(struct repository *r,
-				  struct todo_list *todo_list);
-
 /* Call this to setup defaults before parsing command line options */
 void sequencer_init_config(struct replay_opts *opts);
 int sequencer_pick_revisions(struct repository *repo,
@@ -163,7 +139,6 @@ int sequencer_pick_revisions(struct repository *repo,
 int sequencer_continue(struct repository *repo, struct replay_opts *opts);
 int sequencer_rollback(struct repository *repo, struct replay_opts *opts);
 int sequencer_skip(struct repository *repo, struct replay_opts *opts);
-void replay_opts_release(struct replay_opts *opts);
 int sequencer_remove_state(struct replay_opts *opts);
 
 #define TODO_LIST_KEEP_EMPTY (1U << 0)
@@ -192,7 +167,7 @@ int complete_action(struct repository *r, struct replay_opts *opts, unsigned fla
 		    const char *shortrevisions, const char *onto_name,
 		    struct commit *onto, const struct object_id *orig_head,
 		    struct string_list *commands, unsigned autosquash,
-		    unsigned update_refs,
+		    unsigned keep_decorations,
 		    struct todo_list *todo_list);
 int todo_list_rearrange_squash(struct todo_list *todo_list);
 
@@ -252,19 +227,11 @@ int read_oneliner(struct strbuf *buf,
 	const char *path, unsigned flags);
 int read_author_script(const char *path, char **name, char **email, char **date,
 		       int allow_missing);
+void parse_strategy_opts(struct replay_opts *opts, char *raw_opts);
 int write_basic_state(struct replay_opts *opts, const char *head_name,
 		      struct commit *onto, const struct object_id *orig_head);
 void sequencer_post_commit_cleanup(struct repository *r, int verbose);
 int sequencer_get_last_command(struct repository* r,
 			       enum replay_action *action);
 int sequencer_determine_whence(struct repository *r, enum commit_whence *whence);
-
-/**
- * Append the set of ref-OID pairs that are currently stored for the 'git
- * rebase --update-refs' feature if such a rebase is currently happening.
- *
- * Localized to a worktree's git dir.
- */
-int sequencer_get_update_refs_state(const char *wt_dir, struct string_list *refs);
-
 #endif /* SEQUENCER_H */

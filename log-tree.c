@@ -1,12 +1,8 @@
-#include "git-compat-util.h"
+#include "cache.h"
 #include "commit-reach.h"
 #include "config.h"
 #include "diff.h"
-#include "diffcore.h"
-#include "environment.h"
-#include "hex.h"
-#include "object-name.h"
-#include "object-store-ll.h"
+#include "object-store.h"
 #include "repository.h"
 #include "tmp-objdir.h"
 #include "commit.h"
@@ -16,8 +12,6 @@
 #include "merge-ort.h"
 #include "reflog-walk.h"
 #include "refs.h"
-#include "replace-object.h"
-#include "revision.h"
 #include "string-list.h"
 #include "color.h"
 #include "gpg-interface.h"
@@ -26,25 +20,19 @@
 #include "help.h"
 #include "range-diff.h"
 #include "strmap.h"
-#include "tree.h"
-#include "wildmatch.h"
-#include "write-or-die.h"
 
 static struct decoration name_decoration = { "object names" };
 static int decoration_loaded;
 static int decoration_flags;
 
 static char decoration_colors[][COLOR_MAXLEN] = {
-	[DECORATION_NONE]	= GIT_COLOR_RESET,
-	[DECORATION_REF_LOCAL]	= GIT_COLOR_BOLD_GREEN,
-	[DECORATION_REF_REMOTE]	= GIT_COLOR_BOLD_RED,
-	[DECORATION_REF_TAG]	= GIT_COLOR_BOLD_YELLOW,
-	[DECORATION_REF_STASH]	= GIT_COLOR_BOLD_MAGENTA,
-	[DECORATION_REF]	= GIT_COLOR_BOLD_MAGENTA,
-	[DECORATION_REF_HEAD]	= GIT_COLOR_BOLD_CYAN,
-	[DECORATION_REF_PSEUDO]	= GIT_COLOR_BOLD_CYAN,
-	[DECORATION_GRAFTED]	= GIT_COLOR_BOLD_BLUE,
-	[DECORATION_SYMBOL]	= GIT_COLOR_NIL,
+	GIT_COLOR_RESET,
+	GIT_COLOR_BOLD_GREEN,	/* REF_LOCAL */
+	GIT_COLOR_BOLD_RED,	/* REF_REMOTE */
+	GIT_COLOR_BOLD_YELLOW,	/* REF_TAG */
+	GIT_COLOR_BOLD_MAGENTA,	/* REF_STASH */
+	GIT_COLOR_BOLD_CYAN,	/* REF_HEAD */
+	GIT_COLOR_BOLD_BLUE,	/* GRAFTED */
 };
 
 static const char *color_decorate_slots[] = {
@@ -52,11 +40,8 @@ static const char *color_decorate_slots[] = {
 	[DECORATION_REF_REMOTE] = "remoteBranch",
 	[DECORATION_REF_TAG]	= "tag",
 	[DECORATION_REF_STASH]	= "stash",
-	[DECORATION_REF]	= "ref",
 	[DECORATION_REF_HEAD]	= "HEAD",
-	[DECORATION_REF_PSEUDO]	= "pseudoref",
 	[DECORATION_GRAFTED]	= "grafted",
-	[DECORATION_SYMBOL]	= "symbol",
 };
 
 static const char *decorate_get_color(int decorate_use_color, enum decoration_type ix)
@@ -150,22 +135,19 @@ static int ref_filter_match(const char *refname,
 }
 
 static int add_ref_decoration(const char *refname, const struct object_id *oid,
-			      int flags UNUSED,
-			      void *cb_data)
+			      int flags, void *cb_data)
 {
-	int i;
 	struct object *obj;
 	enum object_type objtype;
-	enum decoration_type deco_type = DECORATION_REF;
+	enum decoration_type deco_type = DECORATION_NONE;
 	struct decoration_filter *filter = (struct decoration_filter *)cb_data;
-	const char *git_replace_ref_base = ref_namespace[NAMESPACE_REPLACE].ref;
 
 	if (filter && !ref_filter_match(refname, filter))
 		return 0;
 
 	if (starts_with(refname, git_replace_ref_base)) {
 		struct object_id original_oid;
-		if (!replace_refs_enabled(the_repository))
+		if (!read_replace_refs)
 			return 0;
 		if (get_oid_hex(refname + strlen(git_replace_ref_base),
 				&original_oid)) {
@@ -183,21 +165,16 @@ static int add_ref_decoration(const char *refname, const struct object_id *oid,
 		return 0;
 	obj = lookup_object_by_type(the_repository, oid, objtype);
 
-	for (i = 0; i < ARRAY_SIZE(ref_namespace); i++) {
-		struct ref_namespace_info *info = &ref_namespace[i];
-
-		if (!info->decoration)
-			continue;
-		if (info->exact) {
-			if (!strcmp(refname, info->ref)) {
-				deco_type = info->decoration;
-				break;
-			}
-		} else if (starts_with(refname, info->ref)) {
-			deco_type = info->decoration;
-			break;
-		}
-	}
+	if (starts_with(refname, "refs/heads/"))
+		deco_type = DECORATION_REF_LOCAL;
+	else if (starts_with(refname, "refs/remotes/"))
+		deco_type = DECORATION_REF_REMOTE;
+	else if (starts_with(refname, "refs/tags/"))
+		deco_type = DECORATION_REF_TAG;
+	else if (!strcmp(refname, "refs/stash"))
+		deco_type = DECORATION_REF_STASH;
+	else if (!strcmp(refname, "HEAD"))
+		deco_type = DECORATION_REF_HEAD;
 
 	add_name_decoration(deco_type, refname, obj);
 	while (obj->type == OBJ_TAG) {
@@ -211,29 +188,7 @@ static int add_ref_decoration(const char *refname, const struct object_id *oid,
 	return 0;
 }
 
-static int add_pseudoref_decoration(const char *refname,
-				    const struct object_id *oid,
-				    int flags UNUSED,
-				    void *cb_data)
-{
-	struct object *obj;
-	enum object_type objtype;
-	struct decoration_filter *filter = (struct decoration_filter *)cb_data;
-
-	if (filter && !ref_filter_match(refname, filter))
-		return 0;
-
-	objtype = oid_object_info(the_repository, oid, NULL);
-	if (objtype < 0)
-		return 0;
-
-	obj = lookup_object_by_type(the_repository, oid, objtype);
-	add_name_decoration(DECORATION_REF_PSEUDO, refname, obj);
-	return 0;
-}
-
-static int add_graft_decoration(const struct commit_graft *graft,
-				void *cb_data UNUSED)
+static int add_graft_decoration(const struct commit_graft *graft, void *cb_data)
 {
 	struct commit *commit = lookup_commit(the_repository, &graft->oid);
 	if (!commit)
@@ -260,7 +215,6 @@ void load_ref_decorations(struct decoration_filter *filter, int flags)
 		decoration_loaded = 1;
 		decoration_flags = flags;
 		for_each_ref(add_ref_decoration, filter);
-		for_each_pseudoref(add_pseudoref_decoration, filter);
 		head_ref(add_ref_decoration, filter);
 		for_each_commit_graft(add_graft_decoration, filter);
 	}
@@ -271,8 +225,7 @@ static void show_parents(struct commit *commit, int abbrev, FILE *file)
 	struct commit_list *p;
 	for (p = commit->parents; p ; p = p->next) {
 		struct commit *parent = p->item;
-		fprintf(file, " %s",
-			repo_find_unique_abbrev(the_repository, &parent->object.oid, abbrev));
+		fprintf(file, " %s", find_unique_abbrev(&parent->object.oid, abbrev));
 	}
 }
 
@@ -280,8 +233,7 @@ static void show_children(struct rev_info *opt, struct commit *commit, int abbre
 {
 	struct commit_list *p = lookup_decoration(&opt->children, &commit->object);
 	for ( ; p; p = p->next) {
-		fprintf(opt->diffopt.file, " %s",
-			repo_find_unique_abbrev(the_repository, &p->item->object.oid, abbrev));
+		fprintf(opt->diffopt.file, " %s", find_unique_abbrev(&p->item->object.oid, abbrev));
 	}
 }
 
@@ -330,94 +282,102 @@ static void show_name(struct strbuf *sb, const struct name_decoration *decoratio
 		strbuf_addstr(sb, decoration->name);
 }
 
+struct format_decorations_context {
+	struct strbuf *sb;
+	int use_color;
+	const char *prefix;
+	const char *separator;
+	const char *suffix;
+	const char *color_commit;
+	const char *color_reset;
+	const struct name_decoration *current_and_HEAD;
+};
+
+static int append_decoration(const struct name_decoration *d,
+			     void *data)
+{
+	struct format_decorations_context *ctx = data;
+	/*
+	 * When both current and HEAD are there, only
+	 * show HEAD->current where HEAD would have
+	 * appeared, skipping the entry for current.
+	 */
+	if (d != ctx->current_and_HEAD) {
+		strbuf_addstr(ctx->sb, ctx->color_commit);
+		strbuf_addstr(ctx->sb, ctx->prefix);
+		strbuf_addstr(ctx->sb, ctx->color_reset);
+		strbuf_addstr(ctx->sb, decorate_get_color(ctx->use_color, d->type));
+		if (d->type == DECORATION_REF_TAG)
+			strbuf_addstr(ctx->sb, "tag: ");
+
+		show_name(ctx->sb, d);
+
+		if (ctx->current_and_HEAD &&
+		    d->type == DECORATION_REF_HEAD) {
+			strbuf_addstr(ctx->sb, " -> ");
+			strbuf_addstr(ctx->sb, ctx->color_reset);
+			strbuf_addstr(ctx->sb,
+				      decorate_get_color(
+						ctx->use_color,
+						ctx->current_and_HEAD->type));
+			show_name(ctx->sb, ctx->current_and_HEAD);
+		}
+		strbuf_addstr(ctx->sb, ctx->color_reset);
+
+		ctx->prefix = ctx->separator;
+	}
+
+	return 0;
+}
+
 /*
  * The caller makes sure there is no funny color before calling.
- * format_decorations ensures the same after return.
+ * format_decorations_extended makes sure the same after return.
  */
-void format_decorations(struct strbuf *sb,
+void format_decorations_extended(struct strbuf *sb,
 			const struct commit *commit,
 			int use_color,
-			const struct decoration_options *opts)
+			const char *prefix,
+			const char *separator,
+			const char *suffix)
 {
 	const struct name_decoration *decoration;
-	const struct name_decoration *current_and_HEAD;
-	const char *color_symbol, *color_reset;
-
-	const char *prefix = " (";
-	const char *suffix = ")";
-	const char *separator = ", ";
-	const char *pointer = " -> ";
-	const char *tag = "tag: ";
+	struct format_decorations_context ctx = {
+		.sb = sb,
+		.use_color = use_color,
+		.prefix = prefix,
+		.separator = separator,
+		.suffix = suffix,
+		.color_commit =	diff_get_color(use_color, DIFF_COMMIT),
+		.color_reset = decorate_get_color(use_color, DECORATION_NONE),
+	};
 
 	decoration = get_name_decoration(&commit->object);
 	if (!decoration)
 		return;
 
-	if (opts) {
-		if (opts->prefix)
-			prefix = opts->prefix;
-		if (opts->suffix)
-			suffix = opts->suffix;
-		if (opts->separator)
-			separator = opts->separator;
-		if (opts->pointer)
-			pointer = opts->pointer;
-		if (opts->tag)
-			tag = opts->tag;
-	}
+	ctx.current_and_HEAD = current_pointed_by_HEAD(decoration);
 
-	color_symbol = decorate_get_color(use_color, DECORATION_SYMBOL);
-	if (color_is_nil(color_symbol))
-		color_symbol = diff_get_color(use_color, DIFF_COMMIT);
+	for_each_decoration(commit, append_decoration, &ctx);
 
-	color_reset = decorate_get_color(use_color, DECORATION_NONE);
+	strbuf_addstr(sb, ctx.color_commit);
+	strbuf_addstr(sb, ctx.suffix);
+	strbuf_addstr(sb, ctx.color_reset);
+}
 
-	current_and_HEAD = current_pointed_by_HEAD(decoration);
+int for_each_decoration(const struct commit *c, decoration_fn fn, void *data)
+{
+	const struct name_decoration *decoration;
+
+	decoration = get_name_decoration(&c->object);
 	while (decoration) {
-		/*
-		 * When both current and HEAD are there, only
-		 * show HEAD->current where HEAD would have
-		 * appeared, skipping the entry for current.
-		 */
-		if (decoration != current_and_HEAD) {
-			const char *color =
-				decorate_get_color(use_color, decoration->type);
-
-			if (*prefix) {
-				strbuf_addstr(sb, color_symbol);
-				strbuf_addstr(sb, prefix);
-				strbuf_addstr(sb, color_reset);
-			}
-
-			if (*tag && decoration->type == DECORATION_REF_TAG) {
-				strbuf_addstr(sb, color);
-				strbuf_addstr(sb, tag);
-				strbuf_addstr(sb, color_reset);
-			}
-
-			strbuf_addstr(sb, color);
-			show_name(sb, decoration);
-			strbuf_addstr(sb, color_reset);
-
-			if (current_and_HEAD &&
-			    decoration->type == DECORATION_REF_HEAD) {
-				strbuf_addstr(sb, color_symbol);
-				strbuf_addstr(sb, pointer);
-				strbuf_addstr(sb, color_reset);
-				strbuf_addstr(sb, decorate_get_color(use_color, current_and_HEAD->type));
-				show_name(sb, current_and_HEAD);
-				strbuf_addstr(sb, color_reset);
-			}
-
-			prefix = separator;
-		}
+		int res;
+		if ((res = fn(decoration, data)))
+			return res;
 		decoration = decoration->next;
 	}
-	if (*suffix) {
-		strbuf_addstr(sb, color_symbol);
-		strbuf_addstr(sb, suffix);
-		strbuf_addstr(sb, color_reset);
-	}
+
+	return 0;
 }
 
 void show_decorations(struct rev_info *opt, struct commit *commit)
@@ -432,7 +392,7 @@ void show_decorations(struct rev_info *opt, struct commit *commit)
 	}
 	if (!opt->show_decorations)
 		return;
-	format_decorations(&sb, commit, opt->diffopt.use_color, NULL);
+	format_decorations(&sb, commit, opt->diffopt.use_color);
 	fputs(sb.buf, opt->diffopt.file);
 	strbuf_release(&sb);
 }
@@ -478,8 +438,7 @@ void fmt_output_commit(struct strbuf *filename,
 	struct pretty_print_context ctx = {0};
 	struct strbuf subject = STRBUF_INIT;
 
-	repo_format_commit_message(the_repository, commit, "%f", &subject,
-				   &ctx);
+	format_commit_message(commit, "%f", &subject, &ctx);
 	fmt_output_subject(filename, subject.buf, info);
 	strbuf_release(&subject);
 }
@@ -514,7 +473,7 @@ void log_write_email_headers(struct rev_info *opt, struct commit *commit,
 	fprintf(opt->diffopt.file, "From %s Mon Sep 17 00:00:00 2001\n", name);
 	graph_show_oneline(opt->graph);
 	if (opt->message_id) {
-		fprintf(opt->diffopt.file, "Message-ID: <%s>\n", opt->message_id);
+		fprintf(opt->diffopt.file, "Message-Id: <%s>\n", opt->message_id);
 		graph_show_oneline(opt->graph);
 	}
 	if (opt->ref_message_ids && opt->ref_message_ids->nr > 0) {
@@ -718,8 +677,7 @@ void show_log(struct rev_info *opt)
 
 		if (!opt->graph)
 			put_revision_mark(opt, commit);
-		fputs(repo_find_unique_abbrev(the_repository, &commit->object.oid, abbrev_commit),
-		      opt->diffopt.file);
+		fputs(find_unique_abbrev(&commit->object.oid, abbrev_commit), opt->diffopt.file);
 		if (opt->print_parents)
 			show_parents(commit, abbrev_commit, opt->diffopt.file);
 		if (opt->children.name)
@@ -781,8 +739,8 @@ void show_log(struct rev_info *opt)
 
 		if (!opt->graph)
 			put_revision_mark(opt, commit);
-		fputs(repo_find_unique_abbrev(the_repository, &commit->object.oid,
-					      abbrev_commit),
+		fputs(find_unique_abbrev(&commit->object.oid,
+					 abbrev_commit),
 		      opt->diffopt.file);
 		if (opt->print_parents)
 			show_parents(commit, abbrev_commit, opt->diffopt.file);
@@ -790,7 +748,7 @@ void show_log(struct rev_info *opt)
 			show_children(opt, commit, abbrev_commit);
 		if (parent)
 			fprintf(opt->diffopt.file, " (from %s)",
-			       repo_find_unique_abbrev(the_repository, &parent->object.oid, abbrev_commit));
+			       find_unique_abbrev(&parent->object.oid, abbrev_commit));
 		fputs(diff_get_color_opt(&opt->diffopt, DIFF_RESET), opt->diffopt.file);
 		show_decorations(opt, commit);
 		if (opt->commit_format == CMIT_FMT_ONELINE) {
@@ -921,7 +879,7 @@ void show_log(struct rev_info *opt)
 		 * Pass minimum required diff-options to range-diff; others
 		 * can be added later if deemed desirable.
 		 */
-		repo_diff_setup(the_repository, &opts);
+		diff_setup(&opts);
 		opts.file = opt->diffopt.file;
 		opts.use_color = opt->diffopt.use_color;
 		diff_setup_done(&opts);
@@ -1039,7 +997,8 @@ static void cleanup_additional_headers(struct diff_options *o)
 
 static int do_remerge_diff(struct rev_info *opt,
 			   struct commit_list *parents,
-			   struct object_id *oid)
+			   struct object_id *oid,
+			   struct commit *commit)
 {
 	struct merge_options o;
 	struct commit_list *bases;
@@ -1057,17 +1016,15 @@ static int do_remerge_diff(struct rev_info *opt,
 	o.msg_header_prefix = "remerge";
 
 	ctx.abbrev = DEFAULT_ABBREV;
-	repo_format_commit_message(the_repository, parent1, "%h (%s)",
-				   &parent1_desc, &ctx);
-	repo_format_commit_message(the_repository, parent2, "%h (%s)",
-				   &parent2_desc, &ctx);
+	format_commit_message(parent1, "%h (%s)", &parent1_desc, &ctx);
+	format_commit_message(parent2, "%h (%s)", &parent2_desc, &ctx);
 	o.branch1 = parent1_desc.buf;
 	o.branch2 = parent2_desc.buf;
 
 	/* Parse the relevant commits and get the merge bases */
 	parse_commit_or_die(parent1);
 	parse_commit_or_die(parent2);
-	bases = repo_get_merge_bases(the_repository, parent1, parent2);
+	bases = get_merge_bases(parent1, parent2);
 
 	/* Re-merge the parents */
 	merge_incore_recursive(&o, bases, parent1, parent2, &res);
@@ -1136,7 +1093,7 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 					"for octopus merges.\n");
 				return 1;
 			}
-			return do_remerge_diff(opt, parents, oid);
+			return do_remerge_diff(opt, parents, oid, commit);
 		}
 		if (opt->combine_merges)
 			return do_diff_combined(opt, commit);

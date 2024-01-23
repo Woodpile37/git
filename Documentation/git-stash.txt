@@ -9,20 +9,19 @@ SYNOPSIS
 --------
 [verse]
 'git stash' list [<log-options>]
-'git stash' show [-u | --include-untracked | --only-untracked] [<diff-options>] [<stash>]
-'git stash' drop [-q | --quiet] [<stash>]
-'git stash' pop [--index] [-q | --quiet] [<stash>]
-'git stash' apply [--index] [-q | --quiet] [<stash>]
+'git stash' show [-u|--include-untracked|--only-untracked] [<diff-options>] [<stash>]
+'git stash' drop [-q|--quiet] [<stash>]
+'git stash' ( pop | apply ) [--index] [-q|--quiet] [<stash>]
 'git stash' branch <branchname> [<stash>]
-'git stash' [push [-p | --patch] [-S | --staged] [-k | --[no-]keep-index] [-q | --quiet]
-	     [-u | --include-untracked] [-a | --all] [(-m | --message) <message>]
+'git stash' [push [-p|--patch] [-S|--staged] [-k|--[no-]keep-index] [-q|--quiet]
+	     [-u|--include-untracked] [-a|--all] [-m|--message <message>]
 	     [--pathspec-from-file=<file> [--pathspec-file-nul]]
 	     [--] [<pathspec>...]]
-'git stash' save [-p | --patch] [-S | --staged] [-k | --[no-]keep-index] [-q | --quiet]
-	     [-u | --include-untracked] [-a | --all] [<message>]
 'git stash' clear
 'git stash' create [<message>]
-'git stash' store [(-m | --message) <message>] [-q | --quiet] <commit>
+'git stash' store [-m|--message <message>] [-q|--quiet] <commit>
+'git stash' export ( --print | --to-ref <ref> ) [<stash>...]
+'git stash' import <commit>
 
 DESCRIPTION
 -----------
@@ -50,7 +49,7 @@ stash index (e.g. the integer `n` is equivalent to `stash@{n}`).
 COMMANDS
 --------
 
-push [-p|--patch] [-S|--staged] [-k|--[no-]keep-index] [-u|--include-untracked] [-a|--all] [-q|--quiet] [(-m|--message) <message>] [--pathspec-from-file=<file> [--pathspec-file-nul]] [--] [<pathspec>...]::
+push [-p|--patch] [-S|--staged] [-k|--[no-]keep-index] [-u|--include-untracked] [-a|--all] [-q|--quiet] [-m|--message <message>] [--pathspec-from-file=<file> [--pathspec-file-nul]] [--] [<pathspec>...]::
 
 	Save your local modifications to a new 'stash entry' and roll them
 	back to HEAD (in the working tree and in the index).
@@ -154,6 +153,18 @@ store::
 	reflog.  This is intended to be useful for scripts.  It is
 	probably not the command you want to use; see "push" above.
 
+export ( --print | --to-ref <ref> ) [<stash>...]::
+
+	Export the specified stashes, or all of them if none are specified, to
+	a chain of commits which can be transferred using the normal fetch and
+	push mechanisms, then imported using the `import` subcommand.
+
+import <commit>::
+
+	Import the specified stashes from the specified commit, which must have been
+	created by `export`, and add them to the list of stashes.  To replace the
+	existing stashes, use `clear` first.
+
 OPTIONS
 -------
 -a::
@@ -242,6 +253,19 @@ literally (including newlines and quotes).
 +
 Quiet, suppress feedback messages.
 
+--print::
+	This option is only valid for `export`.
++
+Create the chain of commits representing the exported stashes without
+storing it anywhere in the ref namespace and print the object ID to
+standard output.  This is designed for scripts.
+
+--to-ref::
+	This option is only valid for `export`.
++
+Create the chain of commits representing the exported stashes and store
+it to the specified ref.
+
 \--::
 	This option is only valid for `push` command.
 +
@@ -259,7 +283,7 @@ For more details, see the 'pathspec' entry in linkgit:gitglossary[7].
 
 <stash>::
 	This option is only valid for `apply`, `branch`, `drop`, `pop`,
-	`show` commands.
+	`show`, and `export` commands.
 +
 A reference of the form `stash@{<revision>}`. When no `<stash>` is
 given, the latest stash is assumed (that is, `stash@{0}`).
@@ -366,7 +390,7 @@ only the commit ends-up being in the stash and not on the current branch.
 # ... hack hack hack ...
 $ git add --patch foo           # add unrelated changes to the index
 $ git stash push --staged       # save these changes to the stash
-# ... hack hack hack, finish current changes ...
+# ... hack hack hack, finish curent changes ...
 $ git commit -m 'Massive'       # commit fully tested changes
 $ git switch fixup-branch       # switch to another branch
 $ git stash pop                 # to finish work on the saved changes
@@ -384,13 +408,6 @@ git fsck --unreachable |
 grep commit | cut -d\  -f3 |
 xargs git log --merges --no-walk --grep=WIP
 ----------------------------------------------------------------
-
-CONFIGURATION
--------------
-
-include::includes/cmd-config-section-all.txt[]
-
-include::config/stash.txt[]
 
 
 SEE ALSO

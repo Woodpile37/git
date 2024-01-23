@@ -10,10 +10,14 @@
 static int inside_git_dir = -1;
 static int inside_work_tree = -1;
 static int work_tree_config_is_bogus;
-enum allowed_bare_repo {
-	ALLOWED_BARE_REPO_EXPLICIT = 0,
-	ALLOWED_BARE_REPO_ALL,
+enum discovery_bare_config {
+	DISCOVERY_BARE_UNKNOWN = -1,
+	DISCOVERY_BARE_NEVER = 0,
+	DISCOVERY_BARE_ALWAYS,
+	DISCOVERY_BARE_CWD,
 };
+static enum discovery_bare_config discovery_bare_config =
+	DISCOVERY_BARE_UNKNOWN;
 
 static struct startup_info the_startup_info;
 struct startup_info *startup_info = &the_startup_info;
@@ -577,18 +581,6 @@ static enum extension_result handle_extension(const char *var,
 				     "extensions.objectformat", value);
 		data->hash_algo = format;
 		return EXTENSION_OK;
-	} else if (!strcmp(ext, "refformat")) {
-		if (!strcmp(value, "files"))
-			data->ref_format |= REF_FORMAT_FILES;
-		else if (!strcmp(value, "packed"))
-			data->ref_format |= REF_FORMAT_PACKED;
-		else if (!strcmp(value, "packed-v2"))
-			data->ref_format |= REF_FORMAT_PACKED_V2;
-		else
-			return error(_("invalid value for '%s': '%s'"),
-				     "extensions.refFormat", value);
-		data->ref_format_count++;
-		return EXTENSION_OK;
 	}
 	return EXTENSION_UNKNOWN;
 }
@@ -730,14 +722,6 @@ int read_repository_format(struct repository_format *format, const char *path)
 	git_config_from_file(check_repo_format, path, format);
 	if (format->version == -1)
 		clear_repository_format(format);
-
-	/* Set default ref_format if no extensions.refFormat exists. */
-	if (!format->ref_format_count) {
-		format->ref_format = REF_FORMAT_FILES | REF_FORMAT_PACKED;
-		if (git_env_ulong("GIT_TEST_PACKED_REFS_VERSION", 0) == 2)
-			format->ref_format |= REF_FORMAT_PACKED_V2;
-	}
-
 	return format->version;
 }
 
@@ -1153,76 +1137,71 @@ static int safe_directory_cb(const char *key, const char *value, void *d)
 	return 0;
 }
 
-/*
- * Check if a repository is safe, by verifying the ownership of the
- * worktree (if any), the git directory, and the gitfile (if any).
- *
- * Exemptions for known-safe repositories can be added via `safe.directory`
- * config settings; for non-bare repositories, their worktree needs to be
- * added, for bare ones their git directory.
- */
-static int ensure_valid_ownership(const char *gitfile,
-				  const char *worktree, const char *gitdir,
-				  struct strbuf *report)
+static int ensure_valid_ownership(const char *path)
 {
-	struct safe_directory_data data = {
-		.path = worktree ? worktree : gitdir
-	};
+	struct safe_directory_data data = { .path = path };
 
 	if (!git_env_bool("GIT_TEST_ASSUME_DIFFERENT_OWNER", 0) &&
-	    (!gitfile || is_path_owned_by_current_user(gitfile, report)) &&
-	    (!worktree || is_path_owned_by_current_user(worktree, report)) &&
-	    (!gitdir || is_path_owned_by_current_user(gitdir, report)))
+	    is_path_owned_by_current_user(path))
 		return 1;
 
-	/*
-	 * data.path is the "path" that identifies the repository and it is
-	 * constant regardless of what failed above. data.is_safe should be
-	 * initialized to false, and might be changed by the callback.
-	 */
-	git_protected_config(safe_directory_cb, &data);
+	read_very_early_config(safe_directory_cb, &data);
 
 	return data.is_safe;
 }
 
-static int allowed_bare_repo_cb(const char *key, const char *value, void *d)
+static int discovery_bare_cb(const char *key, const char *value, void *d)
 {
-	enum allowed_bare_repo *allowed_bare_repo = d;
-
-	if (strcasecmp(key, "safe.bareRepository"))
+	if (strcmp(key, "discovery.bare"))
 		return 0;
 
-	if (!strcmp(value, "explicit")) {
-		*allowed_bare_repo = ALLOWED_BARE_REPO_EXPLICIT;
+	if (!strcmp(value, "never")) {
+		discovery_bare_config = DISCOVERY_BARE_NEVER;
 		return 0;
 	}
-	if (!strcmp(value, "all")) {
-		*allowed_bare_repo = ALLOWED_BARE_REPO_ALL;
+	if (!strcmp(value, "always")) {
+		discovery_bare_config = DISCOVERY_BARE_ALWAYS;
+		return 0;
+	}
+	if (!strcmp(value, "cwd")) {
+		discovery_bare_config = DISCOVERY_BARE_CWD;
 		return 0;
 	}
 	return -1;
 }
 
-static enum allowed_bare_repo get_allowed_bare_repo(void)
+static int check_bare_repo_allowed(const char *cwd, const char *path)
 {
-	enum allowed_bare_repo result = ALLOWED_BARE_REPO_ALL;
-	git_protected_config(allowed_bare_repo_cb, &result);
-	return result;
+	if (discovery_bare_config == DISCOVERY_BARE_UNKNOWN) {
+		read_very_early_config(discovery_bare_cb, NULL);
+		/* We didn't find a value; use the default. */
+		if (discovery_bare_config == DISCOVERY_BARE_UNKNOWN)
+			discovery_bare_config = DISCOVERY_BARE_ALWAYS;
+	}
+	switch (discovery_bare_config) {
+	case DISCOVERY_BARE_NEVER:
+		return 0;
+	case DISCOVERY_BARE_ALWAYS:
+		return 1;
+	case DISCOVERY_BARE_CWD:
+		return !strcmp(cwd, path);
+	default:
+		BUG("invalid discovery_bare_config %d", discovery_bare_config);
+	}
 }
 
-static const char *allowed_bare_repo_to_string(
-	enum allowed_bare_repo allowed_bare_repo)
+static const char *discovery_bare_config_to_string(void)
 {
-	switch (allowed_bare_repo) {
-	case ALLOWED_BARE_REPO_EXPLICIT:
-		return "explicit";
-	case ALLOWED_BARE_REPO_ALL:
-		return "all";
+	switch (discovery_bare_config) {
+	case DISCOVERY_BARE_NEVER:
+		return "never";
+	case DISCOVERY_BARE_ALWAYS:
+		return "always";
+	case DISCOVERY_BARE_CWD:
+		return "cwd";
 	default:
-		BUG("invalid allowed_bare_repo %d",
-		    allowed_bare_repo);
+		BUG("invalid discovery_bare_config %d", discovery_bare_config);
 	}
-	return NULL;
 }
 
 enum discovery_result {
@@ -1235,7 +1214,7 @@ enum discovery_result {
 	GIT_DIR_HIT_MOUNT_POINT = -2,
 	GIT_DIR_INVALID_GITFILE = -3,
 	GIT_DIR_INVALID_OWNERSHIP = -4,
-	GIT_DIR_DISALLOWED_BARE = -5,
+	GIT_DIR_DISALLOWED_BARE = -5
 };
 
 /*
@@ -1251,9 +1230,9 @@ enum discovery_result {
  * the discovered .git/ directory, if any. If `gitdir` is not absolute, it
  * is relative to `dir` (i.e. *not* necessarily the cwd).
  */
-static enum discovery_result setup_git_directory_gently_1(struct strbuf *dir,
+static enum discovery_result setup_git_directory_gently_1(struct strbuf *cwd,
+							  struct strbuf *dir,
 							  struct strbuf *gitdir,
-							  struct strbuf *report,
 							  int die_on_error)
 {
 	const char *env_ceiling_dirs = getenv(CEILING_DIRECTORIES_ENVIRONMENT);
@@ -1309,8 +1288,6 @@ static enum discovery_result setup_git_directory_gently_1(struct strbuf *dir,
 		current_device = get_device_or_die(dir->buf, NULL, 0);
 	for (;;) {
 		int offset = dir->len, error_code = 0;
-		char *gitdir_path = NULL;
-		char *gitfile = NULL;
 
 		if (offset > min_offset)
 			strbuf_addch(dir, '/');
@@ -1321,53 +1298,23 @@ static enum discovery_result setup_git_directory_gently_1(struct strbuf *dir,
 			if (die_on_error ||
 			    error_code == READ_GITFILE_ERR_NOT_A_FILE) {
 				/* NEEDSWORK: fail if .git is not file nor dir */
-				if (is_git_directory(dir->buf)) {
+				if (is_git_directory(dir->buf))
 					gitdirenv = DEFAULT_GIT_DIR_ENVIRONMENT;
-					gitdir_path = xstrdup(dir->buf);
-				}
 			} else if (error_code != READ_GITFILE_ERR_STAT_FAILED)
 				return GIT_DIR_INVALID_GITFILE;
-		} else
-			gitfile = xstrdup(dir->buf);
-		/*
-		 * Earlier, we tentatively added DEFAULT_GIT_DIR_ENVIRONMENT
-		 * to check that directory for a repository.
-		 * Now trim that tentative addition away, because we want to
-		 * focus on the real directory we are in.
-		 */
+		}
 		strbuf_setlen(dir, offset);
 		if (gitdirenv) {
-			enum discovery_result ret;
-			const char *gitdir_candidate =
-				gitdir_path ? gitdir_path : gitdirenv;
-
-			if (ensure_valid_ownership(gitfile, dir->buf,
-						   gitdir_candidate, report)) {
-				strbuf_addstr(gitdir, gitdirenv);
-				ret = GIT_DIR_DISCOVERED;
-			} else
-				ret = GIT_DIR_INVALID_OWNERSHIP;
-
-			/*
-			 * Earlier, during discovery, we might have allocated
-			 * string copies for gitdir_path or gitfile so make
-			 * sure we don't leak by freeing them now, before
-			 * leaving the loop and function.
-			 *
-			 * Note: gitdirenv will be non-NULL whenever these are
-			 * allocated, therefore we need not take care of releasing
-			 * them outside of this conditional block.
-			 */
-			free(gitdir_path);
-			free(gitfile);
-
-			return ret;
+			if (!ensure_valid_ownership(dir->buf))
+				return GIT_DIR_INVALID_OWNERSHIP;
+			strbuf_addstr(gitdir, gitdirenv);
+			return GIT_DIR_DISCOVERED;
 		}
 
 		if (is_git_directory(dir->buf)) {
-			if (get_allowed_bare_repo() == ALLOWED_BARE_REPO_EXPLICIT)
+			if (!check_bare_repo_allowed(cwd->buf, dir->buf))
 				return GIT_DIR_DISALLOWED_BARE;
-			if (!ensure_valid_ownership(NULL, NULL, dir->buf, report))
+			if (!ensure_valid_ownership(dir->buf))
 				return GIT_DIR_INVALID_OWNERSHIP;
 			strbuf_addstr(gitdir, ".");
 			return GIT_DIR_BARE;
@@ -1391,16 +1338,18 @@ static enum discovery_result setup_git_directory_gently_1(struct strbuf *dir,
 int discover_git_directory(struct strbuf *commondir,
 			   struct strbuf *gitdir)
 {
-	struct strbuf dir = STRBUF_INIT, err = STRBUF_INIT;
+	struct strbuf cwd = STRBUF_INIT, dir = STRBUF_INIT, err = STRBUF_INIT;
 	size_t gitdir_offset = gitdir->len, cwd_len;
 	size_t commondir_offset = commondir->len;
 	struct repository_format candidate = REPOSITORY_FORMAT_INIT;
 
-	if (strbuf_getcwd(&dir))
+	if (strbuf_getcwd(&cwd))
 		return -1;
+	strbuf_addbuf(&dir, &cwd);
 
 	cwd_len = dir.len;
-	if (setup_git_directory_gently_1(&dir, gitdir, NULL, 0) <= 0) {
+	if (setup_git_directory_gently_1(&cwd, &dir, gitdir, 0) <= 0) {
+		strbuf_release(&cwd);
 		strbuf_release(&dir);
 		return -1;
 	}
@@ -1423,6 +1372,7 @@ int discover_git_directory(struct strbuf *commondir,
 	strbuf_reset(&dir);
 	strbuf_addf(&dir, "%s/config", commondir->buf + commondir_offset);
 	read_repository_format(&candidate, dir.buf);
+	strbuf_release(&cwd);
 	strbuf_release(&dir);
 
 	if (verify_repository_format(&candidate, &err) < 0) {
@@ -1440,9 +1390,6 @@ int discover_git_directory(struct strbuf *commondir,
 		candidate.partial_clone;
 	candidate.partial_clone = NULL;
 
-	/* take ownership of candidate.ref_format */
-	the_repository->ref_format = candidate.ref_format;
-
 	clear_repository_format(&candidate);
 	return 0;
 }
@@ -1450,7 +1397,7 @@ int discover_git_directory(struct strbuf *commondir,
 const char *setup_git_directory_gently(int *nongit_ok)
 {
 	static struct strbuf cwd = STRBUF_INIT;
-	struct strbuf dir = STRBUF_INIT, gitdir = STRBUF_INIT, report = STRBUF_INIT;
+	struct strbuf dir = STRBUF_INIT, gitdir = STRBUF_INIT;
 	const char *prefix = NULL;
 	struct repository_format repo_fmt = REPOSITORY_FORMAT_INIT;
 
@@ -1475,7 +1422,7 @@ const char *setup_git_directory_gently(int *nongit_ok)
 		die_errno(_("Unable to read current working directory"));
 	strbuf_addbuf(&dir, &cwd);
 
-	switch (setup_git_directory_gently_1(&dir, &gitdir, &report, 1)) {
+	switch (setup_git_directory_gently_1(&cwd, &dir, &gitdir, 1)) {
 	case GIT_DIR_EXPLICIT:
 		prefix = setup_explicit_git_dir(gitdir.buf, &cwd, &repo_fmt, nongit_ok);
 		break;
@@ -1507,22 +1454,20 @@ const char *setup_git_directory_gently(int *nongit_ok)
 		if (!nongit_ok) {
 			struct strbuf quoted = STRBUF_INIT;
 
-			strbuf_complete(&report, '\n');
 			sq_quote_buf_pretty(&quoted, dir.buf);
-			die(_("detected dubious ownership in repository at '%s'\n"
-			      "%s"
+			die(_("unsafe repository ('%s' is owned by someone else)\n"
 			      "To add an exception for this directory, call:\n"
 			      "\n"
 			      "\tgit config --global --add safe.directory %s"),
-			    dir.buf, report.buf, quoted.buf);
+			    dir.buf, quoted.buf);
 		}
 		*nongit_ok = 1;
 		break;
 	case GIT_DIR_DISALLOWED_BARE:
 		if (!nongit_ok) {
-			die(_("cannot use bare repository '%s' (safe.bareRepository is '%s')"),
+			die(_("cannot use bare repository '%s' (discovery.bare is '%s')"),
 			    dir.buf,
-			    allowed_bare_repo_to_string(get_allowed_bare_repo()));
+			    discovery_bare_config_to_string());
 		}
 		*nongit_ok = 1;
 		break;
@@ -1534,7 +1479,7 @@ const char *setup_git_directory_gently(int *nongit_ok)
 		 * find a repository.
 		 */
 	default:
-		BUG("unhandled setup_git_directory_gently_1() result");
+		BUG("unhandled setup_git_directory_1() result");
 	}
 
 	/*
@@ -1579,8 +1524,6 @@ const char *setup_git_directory_gently(int *nongit_ok)
 			the_repository->repository_format_partial_clone =
 				repo_fmt.partial_clone;
 			repo_fmt.partial_clone = NULL;
-
-			the_repository->ref_format = repo_fmt.ref_format;
 		}
 	}
 	/*
@@ -1603,7 +1546,6 @@ const char *setup_git_directory_gently(int *nongit_ok)
 
 	strbuf_release(&dir);
 	strbuf_release(&gitdir);
-	strbuf_release(&report);
 	clear_repository_format(&repo_fmt);
 
 	return prefix;
@@ -1670,7 +1612,6 @@ void check_repository_format(struct repository_format *fmt)
 	repo_set_hash_algo(the_repository, fmt->hash_algo);
 	the_repository->repository_format_partial_clone =
 		xstrdup_or_null(fmt->partial_clone);
-	the_repository->ref_format = fmt->ref_format;
 	clear_repository_format(&repo_fmt);
 }
 

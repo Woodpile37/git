@@ -17,7 +17,6 @@ outside the repository.  Two instances for which this can occur are tested:
 	   repository can be added to the index.
 	'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success '1a: setup--config worktree' '
@@ -74,7 +73,10 @@ test_expect_success '1b: pre-add all' '
 	(
 	cd test1 &&
 	local parent_dir="$(pwd)" &&
-	git -C repo ls-files -o --exclude-standard "$parent_dir" >actual-all-unsorted &&
+	(
+		cd repo &&
+		git ls-files -o --exclude-standard "$parent_dir" >../actual-all-unsorted
+	) &&
 	sort actual-all-unsorted >actual-all &&
 	sort expect-all-unsorted >expect-all &&
 	test_cmp expect-all actual-all
@@ -85,7 +87,10 @@ test_expect_success '1c: pre-add dir all' '
 	(
 	cd test1 &&
 	local parent_dir="$(pwd)" &&
-	git -C repo ls-files -o --directory --exclude-standard "$parent_dir" >actual-all-dir-unsorted &&
+	(
+		cd repo &&
+		git ls-files -o --directory --exclude-standard "$parent_dir" >../actual-all-dir-unsorted
+	) &&
 	sort actual-all-dir-unsorted >actual-all &&
 	sort expect-all-dir-unsorted >expect-all &&
 	test_cmp expect-all actual-all
@@ -114,7 +119,10 @@ test_expect_success '1e: post-add untracked' '
 	(
 	cd test1 &&
 	local parent_dir="$(pwd)" &&
-	git -C repo ls-files -o --exclude-standard "$parent_dir" >actual-untracked-unsorted &&
+	(
+		cd repo &&
+		git ls-files -o --exclude-standard "$parent_dir" >../actual-untracked-unsorted
+	) &&
 	sort actual-untracked-unsorted >actual-untracked &&
 	sort expect-untracked-unsorted >expect-untracked &&
 	test_cmp expect-untracked actual-untracked

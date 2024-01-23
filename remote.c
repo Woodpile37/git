@@ -1,27 +1,21 @@
-#include "git-compat-util.h"
-#include "abspath.h"
+#include "cache.h"
 #include "config.h"
-#include "environment.h"
-#include "gettext.h"
-#include "hex.h"
 #include "remote.h"
 #include "urlmatch.h"
 #include "refs.h"
 #include "refspec.h"
-#include "object-name.h"
-#include "object-store-ll.h"
-#include "path.h"
+#include "object-store.h"
 #include "commit.h"
 #include "diff.h"
 #include "revision.h"
 #include "dir.h"
-#include "setup.h"
+#include "tag.h"
 #include "string-list.h"
+#include "mergesort.h"
 #include "strvec.h"
 #include "commit-reach.h"
 #include "advice.h"
 #include "connect.h"
-#include "parse-options.h"
 
 enum map_direction { FROM_SRC, FROM_DST };
 
@@ -93,7 +87,7 @@ struct remotes_hash_key {
 	int len;
 };
 
-static int remotes_hash_cmp(const void *cmp_data UNUSED,
+static int remotes_hash_cmp(const void *unused_cmp_data,
 			    const struct hashmap_entry *eptr,
 			    const struct hashmap_entry *entry_or_key,
 			    const void *keydata)
@@ -152,12 +146,14 @@ static void remote_clear(struct remote *remote)
 	free((char *)remote->name);
 	free((char *)remote->foreign_vcs);
 
-	for (i = 0; i < remote->url_nr; i++)
+	for (i = 0; i < remote->url_nr; i++) {
 		free((char *)remote->url[i]);
-	FREE_AND_NULL(remote->url);
+	}
+	FREE_AND_NULL(remote->pushurl);
 
-	for (i = 0; i < remote->pushurl_nr; i++)
+	for (i = 0; i < remote->pushurl_nr; i++) {
 		free((char *)remote->pushurl[i]);
+	}
 	FREE_AND_NULL(remote->pushurl);
 	free((char *)remote->receivepack);
 	free((char *)remote->uploadpack);
@@ -177,7 +173,7 @@ struct branches_hash_key {
 	int len;
 };
 
-static int branches_hash_cmp(const void *cmp_data UNUSED,
+static int branches_hash_cmp(const void *unused_cmp_data,
 			     const struct hashmap_entry *eptr,
 			     const struct hashmap_entry *entry_or_key,
 			     const void *keydata)
@@ -348,8 +344,7 @@ static void read_branches_file(struct remote_state *remote_state,
 	remote->fetch_tags = 1; /* always auto-follow */
 }
 
-static int handle_config(const char *key, const char *value,
-			 const struct config_context *ctx, void *cb)
+static int handle_config(const char *key, const char *value, void *cb)
 {
 	const char *name;
 	size_t namelen;
@@ -357,7 +352,6 @@ static int handle_config(const char *key, const char *value,
 	struct remote *remote;
 	struct branch *branch;
 	struct remote_state *remote_state = cb;
-	const struct key_value_info *kvi = ctx->kvi;
 
 	if (parse_config_key(key, "branch", &name, &namelen, &subkey) >= 0) {
 		/* There is no subsection. */
@@ -415,8 +409,8 @@ static int handle_config(const char *key, const char *value,
 	}
 	remote = make_remote(remote_state, name, namelen);
 	remote->origin = REMOTE_CONFIG;
-	if (kvi->scope == CONFIG_SCOPE_LOCAL ||
-	    kvi->scope == CONFIG_SCOPE_WORKTREE)
+	if (current_config_scope() == CONFIG_SCOPE_LOCAL ||
+	    current_config_scope() == CONFIG_SCOPE_WORKTREE)
 		remote->configured_in_repo = 1;
 	if (!strcmp(subkey, "mirror"))
 		remote->mirror = git_config_bool(key, value);
@@ -508,7 +502,7 @@ static void alias_all_urls(struct remote_state *remote_state)
 	}
 }
 
-static void read_config(struct repository *repo, int early)
+static void read_config(struct repository *repo)
 {
 	int flag;
 
@@ -517,7 +511,7 @@ static void read_config(struct repository *repo, int early)
 	repo->remote_state->initialized = 1;
 
 	repo->remote_state->current_branch = NULL;
-	if (startup_info->have_repository && !early) {
+	if (startup_info->have_repository) {
 		const char *head_ref = refs_resolve_ref_unsafe(
 			get_main_ref_store(repo), "HEAD", 0, NULL, &flag);
 		if (head_ref && (flag & REF_ISSYMREF) &&
@@ -560,7 +554,7 @@ static const char *remotes_remote_for_branch(struct remote_state *remote_state,
 
 const char *remote_for_branch(struct branch *branch, int *explicit)
 {
-	read_config(the_repository, 0);
+	read_config(the_repository);
 	die_on_missing_branch(the_repository, branch);
 
 	return remotes_remote_for_branch(the_repository->remote_state, branch,
@@ -586,7 +580,7 @@ remotes_pushremote_for_branch(struct remote_state *remote_state,
 
 const char *pushremote_for_branch(struct branch *branch, int *explicit)
 {
-	read_config(the_repository, 0);
+	read_config(the_repository);
 	die_on_missing_branch(the_repository, branch);
 
 	return remotes_pushremote_for_branch(the_repository->remote_state,
@@ -598,7 +592,7 @@ static struct remote *remotes_remote_get(struct remote_state *remote_state,
 
 const char *remote_ref_for_branch(struct branch *branch, int for_push)
 {
-	read_config(the_repository, 0);
+	read_config(the_repository);
 	die_on_missing_branch(the_repository, branch);
 
 	if (branch) {
@@ -631,7 +625,7 @@ static void validate_remote_url(struct remote *remote)
 	struct strbuf redacted = STRBUF_INIT;
 	int warn_not_die;
 
-	if (git_config_get_string_tmp("transfer.credentialsinurl", &value))
+	if (git_config_get_string_tmp("fetch.credentialsinurl", &value))
 		return;
 
 	if (!strcmp("warn", value))
@@ -641,7 +635,7 @@ static void validate_remote_url(struct remote *remote)
 	else if (!strcmp("allow", value))
 		return;
 	else
-		die(_("unrecognized value transfer.credentialsInUrl: '%s'"), value);
+		die(_("unrecognized value fetch.credentialsInURL: '%s'"), value);
 
 	for (i = 0; i < remote->url_nr; i++) {
 		struct url_info url_info = { 0 };
@@ -650,7 +644,6 @@ static void validate_remote_url(struct remote *remote)
 		    !url_info.passwd_off)
 			goto loop_cleanup;
 
-		strbuf_reset(&redacted);
 		strbuf_add(&redacted, url_info.url, url_info.passwd_off);
 		strbuf_addstr(&redacted, "<redacted>");
 		strbuf_addstr(&redacted,
@@ -708,13 +701,7 @@ remotes_remote_get(struct remote_state *remote_state, const char *name)
 
 struct remote *remote_get(const char *name)
 {
-	read_config(the_repository, 0);
-	return remotes_remote_get(the_repository->remote_state, name);
-}
-
-struct remote *remote_get_early(const char *name)
-{
-	read_config(the_repository, 1);
+	read_config(the_repository);
 	return remotes_remote_get(the_repository->remote_state, name);
 }
 
@@ -727,7 +714,7 @@ remotes_pushremote_get(struct remote_state *remote_state, const char *name)
 
 struct remote *pushremote_get(const char *name)
 {
-	read_config(the_repository, 0);
+	read_config(the_repository);
 	return remotes_pushremote_get(the_repository->remote_state, name);
 }
 
@@ -743,7 +730,7 @@ int remote_is_configured(struct remote *remote, int in_repo)
 int for_each_remote(each_remote_fn fn, void *priv)
 {
 	int i, result = 0;
-	read_config(the_repository, 0);
+	read_config(the_repository);
 	for (i = 0; i < the_repository->remote_state->remotes_nr && !result;
 	     i++) {
 		struct remote *remote =
@@ -864,7 +851,7 @@ static int refspec_match(const struct refspec_item *refspec,
 	return !strcmp(refspec->src, name);
 }
 
-int omit_name_by_refspec(const char *name, struct refspec *rs)
+static int omit_name_by_refspec(const char *name, struct refspec *rs)
 {
 	int i;
 
@@ -897,7 +884,7 @@ static int query_matches_negative_refspec(struct refspec *rs, struct refspec_ite
 {
 	int i, matched_negative = 0;
 	int find_src = !query->src;
-	struct string_list reversed = STRING_LIST_INIT_DUP;
+	struct string_list reversed = STRING_LIST_INIT_NODUP;
 	const char *needle = find_src ? query->dst : query->src;
 
 	/*
@@ -1096,6 +1083,27 @@ void free_refs(struct ref *ref)
 	}
 }
 
+int ref_compare_name(const void *va, const void *vb)
+{
+	const struct ref *a = va, *b = vb;
+	return strcmp(a->name, b->name);
+}
+
+static void *ref_list_get_next(const void *a)
+{
+	return ((const struct ref *)a)->next;
+}
+
+static void ref_list_set_next(void *a, void *next)
+{
+	((struct ref *)a)->next = next;
+}
+
+void sort_ref_list(struct ref **l, int (*cmp)(const void *, const void *))
+{
+	*l = llist_mergesort(*l, ref_list_get_next, ref_list_set_next, cmp);
+}
+
 int count_refspec_match(const char *pattern,
 			struct ref *refs,
 			struct ref **matched_ref)
@@ -1178,7 +1186,7 @@ static int try_explicit_object_name(const char *name,
 		return 0;
 	}
 
-	if (repo_get_oid(the_repository, name, &oid))
+	if (get_oid(name, &oid))
 		return -1;
 
 	if (match) {
@@ -1266,7 +1274,7 @@ static void show_push_unqualified_ref_name_error(const char *dst_value,
 	if (!advice_enabled(ADVICE_PUSH_UNQUALIFIED_REF_NAME))
 		return;
 
-	if (repo_get_oid(the_repository, matched_src_name, &oid))
+	if (get_oid(matched_src_name, &oid))
 		BUG("'%s' is not a valid object, "
 		    "match_explicit_lhs() should catch this!",
 		    matched_src_name);
@@ -1774,7 +1782,7 @@ void set_ref_status_for_push(struct ref *remote_refs, int send_mirror,
 		if (!reject_reason && !ref->deletion && !is_null_oid(&ref->old_oid)) {
 			if (starts_with(ref->name, "refs/tags/"))
 				reject_reason = REF_STATUS_REJECT_ALREADY_EXISTS;
-			else if (!repo_has_object_file(the_repository, &ref->old_oid))
+			else if (!has_object_file(&ref->old_oid))
 				reject_reason = REF_STATUS_REJECT_FETCH_FIRST;
 			else if (!lookup_commit_reference_gently(the_repository, &ref->old_oid, 1) ||
 				 !lookup_commit_reference_gently(the_repository, &ref->new_oid, 1))
@@ -1823,9 +1831,8 @@ static void set_merge(struct remote_state *remote_state, struct branch *ret)
 		if (!remote_find_tracking(remote, ret->merge[i]) ||
 		    strcmp(ret->remote_name, "."))
 			continue;
-		if (repo_dwim_ref(the_repository, ret->merge_name[i],
-				  strlen(ret->merge_name[i]), &oid, &ref,
-				  0) == 1)
+		if (dwim_ref(ret->merge_name[i], strlen(ret->merge_name[i]),
+			     &oid, &ref, 0) == 1)
 			ret->merge[i]->dst = ref;
 		else
 			ret->merge[i]->dst = xstrdup(ret->merge_name[i]);
@@ -1836,7 +1843,7 @@ struct branch *branch_get(const char *name)
 {
 	struct branch *ret;
 
-	read_config(the_repository, 0);
+	read_config(the_repository);
 	if (!name || !*name || !strcmp(name, "HEAD"))
 		ret = the_repository->remote_state->current_branch;
 	else
@@ -1978,7 +1985,7 @@ static const char *branch_get_push_1(struct remote_state *remote_state,
 
 const char *branch_get_push(struct branch *branch, struct strbuf *err)
 {
-	read_config(the_repository, 0);
+	read_config(the_repository);
 	die_on_missing_branch(the_repository, branch);
 
 	if (!branch)
@@ -2163,9 +2170,6 @@ static int stat_branch_pair(const char *branch_name, const char *base,
 	struct object_id oid;
 	struct commit *ours, *theirs;
 	struct rev_info revs;
-	struct setup_revision_opt opt = {
-		.free_removed_argv_elements = 1,
-	};
 	struct strvec argv = STRVEC_INIT;
 
 	/* Cannot stat if what we used to build on no longer exists */
@@ -2200,7 +2204,7 @@ static int stat_branch_pair(const char *branch_name, const char *base,
 	strvec_push(&argv, "--");
 
 	repo_init_revisions(the_repository, &revs, NULL);
-	setup_revisions(argv.nr, argv.v, &revs, &opt);
+	setup_revisions(argv.nr, argv.v, &revs, NULL);
 	if (prepare_revision_walk(&revs))
 		die(_("revision walk setup failed"));
 
@@ -2264,8 +2268,7 @@ int stat_tracking_info(struct branch *branch, int *num_ours, int *num_theirs,
  * Return true when there is anything to report, otherwise false.
  */
 int format_tracking_info(struct branch *branch, struct strbuf *sb,
-			 enum ahead_behind_flags abf,
-			 int show_divergence_advice)
+			 enum ahead_behind_flags abf)
 {
 	int ours, theirs, sti;
 	const char *full_base;
@@ -2328,18 +2331,16 @@ int format_tracking_info(struct branch *branch, struct strbuf *sb,
 			       "respectively.\n",
 			   ours + theirs),
 			base, ours, theirs);
-		if (show_divergence_advice &&
-		    advice_enabled(ADVICE_STATUS_HINTS))
+		if (advice_enabled(ADVICE_STATUS_HINTS))
 			strbuf_addstr(sb,
-				_("  (use \"git pull\" if you want to integrate the remote branch with yours)\n"));
+				_("  (use \"git pull\" to merge the remote branch into yours)\n"));
 	}
 	free(base);
 	return 1;
 }
 
 static int one_local_ref(const char *refname, const struct object_id *oid,
-			 int flag UNUSED,
-			 void *cb_data)
+			 int flag, void *cb_data)
 {
 	struct ref ***local_tail = cb_data;
 	struct ref *ref;
@@ -2523,7 +2524,7 @@ static int parse_push_cas_option(struct push_cas_option *cas, const char *arg, i
 		entry->use_tracking = 1;
 	else if (!colon[1])
 		oidclr(&entry->expect);
-	else if (repo_get_oid(the_repository, colon + 1, &entry->expect))
+	else if (get_oid(colon + 1, &entry->expect))
 		return error(_("cannot parse expected object name '%s'"),
 			     colon + 1);
 	return 0;
@@ -2595,22 +2596,19 @@ struct check_and_collect_until_cb_data {
 };
 
 /* Get the timestamp of the latest entry. */
-static int peek_reflog(struct object_id *o_oid UNUSED,
-		       struct object_id *n_oid UNUSED,
-		       const char *ident UNUSED,
-		       timestamp_t timestamp, int tz UNUSED,
-		       const char *message UNUSED, void *cb_data)
+static int peek_reflog(struct object_id *o_oid, struct object_id *n_oid,
+		       const char *ident, timestamp_t timestamp,
+		       int tz, const char *message, void *cb_data)
 {
 	timestamp_t *ts = cb_data;
 	*ts = timestamp;
 	return 1;
 }
 
-static int check_and_collect_until(struct object_id *o_oid UNUSED,
+static int check_and_collect_until(struct object_id *o_oid,
 				   struct object_id *n_oid,
-				   const char *ident UNUSED,
-				   timestamp_t timestamp, int tz UNUSED,
-				   const char *message UNUSED, void *cb_data)
+				   const char *ident, timestamp_t timestamp,
+				   int tz, const char *message, void *cb_data)
 {
 	struct commit *commit;
 	struct check_and_collect_until_cb_data *cb = cb_data;
@@ -2680,7 +2678,7 @@ static int is_reachable_in_reflog(const char *local, const struct ref *remote)
 		if (MERGE_BASES_BATCH_SIZE < size)
 			size = MERGE_BASES_BATCH_SIZE;
 
-		if ((ret = repo_in_merge_bases_many(the_repository, commit, size, chunk)))
+		if ((ret = in_merge_bases_many(commit, size, chunk)))
 			break;
 	}
 
@@ -2772,8 +2770,9 @@ void remote_state_clear(struct remote_state *remote_state)
 {
 	int i;
 
-	for (i = 0; i < remote_state->remotes_nr; i++)
+	for (i = 0; i < remote_state->remotes_nr; i++) {
 		remote_clear(remote_state->remotes[i]);
+	}
 	FREE_AND_NULL(remote_state->remotes);
 	remote_state->remotes_alloc = 0;
 	remote_state->remotes_nr = 0;
@@ -2849,7 +2848,7 @@ char *relative_url(const char *remote_url, const char *url,
 	 * When the url starts with '../', remove that and the
 	 * last directory in remoteurl.
 	 */
-	while (*url) {
+	while (url) {
 		if (starts_with_dot_dot_slash_native(url)) {
 			url += 3;
 			colonsep |= chop_last_dir(&remoteurl, is_relative);

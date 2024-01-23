@@ -18,7 +18,6 @@ This test checks the following functionality:
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_CREATE_REPO_NO_TEMPLATE=1
 . ./test-lib.sh
 
 D=$(pwd)
@@ -27,8 +26,7 @@ mk_empty () {
 	repo_name="$1"
 	test_when_finished "rm -rf \"$repo_name\"" &&
 	test_path_is_missing "$repo_name" &&
-	git init --template= "$repo_name" &&
-	mkdir "$repo_name"/.git/hooks &&
+	git init "$repo_name" &&
 	git -C "$repo_name" config receive.denyCurrentBranch warn
 }
 
@@ -80,7 +78,7 @@ mk_test_with_hooks() {
 
 mk_child() {
 	test_when_finished "rm -rf \"$2\"" &&
-	git clone --template= "$1" "$2"
+	git clone "$1" "$2"
 }
 
 check_push_result () {
@@ -119,17 +117,6 @@ test_expect_success setup '
 	the_commit=$(git show-ref -s --verify refs/heads/main)
 
 '
-
-for cmd in push fetch
-do
-	for opt in ipv4 ipv6
-	do
-		test_expect_success "reject 'git $cmd --no-$opt'" '
-			test_must_fail git $cmd --no-$opt 2>err &&
-			grep "unknown option .no-$opt" err
-		'
-	done
-done
 
 test_expect_success 'fetch without wildcard' '
 	mk_empty testrepo &&
@@ -211,10 +198,7 @@ test_expect_success 'push with negotiation' '
 	test_commit -C testrepo unrelated_commit &&
 	git -C testrepo config receive.hideRefs refs/remotes/origin/first_commit &&
 	test_when_finished "rm event" &&
-	GIT_TRACE2_EVENT="$(pwd)/event" \
-		git -c protocol.version=2 -c push.negotiate=1 \
-		push testrepo refs/heads/main:refs/remotes/origin/main &&
-	grep \"key\":\"total_rounds\",\"value\":\"1\" event &&
+	GIT_TRACE2_EVENT="$(pwd)/event" git -c protocol.version=2 -c push.negotiate=1 push testrepo refs/heads/main:refs/remotes/origin/main &&
 	grep_wrote 2 event # 1 commit, 1 tree
 '
 
@@ -227,22 +211,18 @@ test_expect_success 'push with negotiation proceeds anyway even if negotiation f
 	GIT_TEST_PROTOCOL_VERSION=0 GIT_TRACE2_EVENT="$(pwd)/event" \
 		git -c push.negotiate=1 push testrepo refs/heads/main:refs/remotes/origin/main 2>err &&
 	grep_wrote 5 event && # 2 commits, 2 trees, 1 blob
-	test_grep "push negotiation failed" err
+	test_i18ngrep "push negotiation failed" err
 '
 
 test_expect_success 'push with negotiation does not attempt to fetch submodules' '
 	mk_empty submodule_upstream &&
 	test_commit -C submodule_upstream submodule_commit &&
-	test_config_global protocol.file.allow always &&
 	git submodule add ./submodule_upstream submodule &&
 	mk_empty testrepo &&
 	git push testrepo $the_first_commit:refs/remotes/origin/first_commit &&
 	test_commit -C testrepo unrelated_commit &&
 	git -C testrepo config receive.hideRefs refs/remotes/origin/first_commit &&
-	GIT_TRACE2_EVENT="$(pwd)/event"  git -c submodule.recurse=true \
-		-c protocol.version=2 -c push.negotiate=1 \
-		push testrepo refs/heads/main:refs/remotes/origin/main 2>err &&
-	grep \"key\":\"total_rounds\",\"value\":\"1\" event &&
+	git -c submodule.recurse=true -c protocol.version=2 -c push.negotiate=1 push testrepo refs/heads/main:refs/remotes/origin/main 2>err &&
 	! grep "Fetching submodule" err
 '
 
@@ -410,11 +390,6 @@ test_expect_success 'push with ambiguity' '
 	test_must_fail git push testrepo main:frotz &&
 	check_push_result testrepo $the_first_commit heads/frotz tags/frotz
 
-'
-
-test_expect_success 'push with onelevel ref' '
-	mk_test testrepo heads/main &&
-	test_must_fail git push testrepo HEAD:refs/onelevel
 '
 
 test_expect_success 'push with colon-less refspec (1)' '
@@ -914,13 +889,6 @@ test_expect_success 'push --delete refuses empty string' '
 	test_must_fail git push testrepo --delete ""
 '
 
-test_expect_success 'push --delete onelevel refspecs' '
-	mk_test testrepo heads/main &&
-	git -C testrepo update-ref refs/onelevel refs/heads/main &&
-	git push testrepo --delete refs/onelevel &&
-	test_must_fail git -C testrepo rev-parse --verify refs/onelevel
-'
-
 test_expect_success 'warn on push to HEAD of non-bare repository' '
 	mk_test testrepo heads/main &&
 	(
@@ -969,7 +937,6 @@ test_expect_success 'fetch with branches' '
 	mk_empty testrepo &&
 	git branch second $the_first_commit &&
 	git checkout second &&
-	mkdir testrepo/.git/branches &&
 	echo ".." > testrepo/.git/branches/branch1 &&
 	(
 		cd testrepo &&
@@ -983,7 +950,6 @@ test_expect_success 'fetch with branches' '
 
 test_expect_success 'fetch with branches containing #' '
 	mk_empty testrepo &&
-	mkdir testrepo/.git/branches &&
 	echo "..#second" > testrepo/.git/branches/branch2 &&
 	(
 		cd testrepo &&
@@ -998,11 +964,7 @@ test_expect_success 'fetch with branches containing #' '
 test_expect_success 'push with branches' '
 	mk_empty testrepo &&
 	git checkout second &&
-
-	test_when_finished "rm -rf .git/branches" &&
-	mkdir .git/branches &&
 	echo "testrepo" > .git/branches/branch1 &&
-
 	git push branch1 &&
 	(
 		cd testrepo &&
@@ -1014,11 +976,7 @@ test_expect_success 'push with branches' '
 
 test_expect_success 'push with branches containing #' '
 	mk_empty testrepo &&
-
-	test_when_finished "rm -rf .git/branches" &&
-	mkdir .git/branches &&
 	echo "testrepo#branch3" > .git/branches/branch2 &&
-
 	git push branch2 &&
 	(
 		cd testrepo &&
@@ -1267,7 +1225,7 @@ test_expect_success 'fetch exact SHA1' '
 		# fetching the hidden object should fail by default
 		test_must_fail env GIT_TEST_PROTOCOL_VERSION=0 \
 			git fetch -v ../testrepo $the_commit:refs/heads/copy 2>err &&
-		test_grep "Server does not allow request for unadvertised object" err &&
+		test_i18ngrep "Server does not allow request for unadvertised object" err &&
 		test_must_fail git rev-parse --verify refs/heads/copy &&
 
 		# the server side can allow it to succeed
@@ -1369,7 +1327,7 @@ do
 				git fetch ../testrepo/.git $SHA1_3 2>err &&
 			# ideally we would insist this be on a "remote error:"
 			# line, but it is racy; see the commit message
-			test_grep "not our ref.*$SHA1_3\$" err
+			test_i18ngrep "not our ref.*$SHA1_3\$" err
 		)
 	'
 done
@@ -1407,7 +1365,7 @@ test_expect_success 'peeled advertisements are not considered ref tips' '
 	oid=$(git -C testrepo rev-parse mytag^{commit}) &&
 	test_must_fail env GIT_TEST_PROTOCOL_VERSION=0 \
 		git fetch testrepo $oid 2>err &&
-	test_grep "Server does not allow request for unadvertised object" err
+	test_i18ngrep "Server does not allow request for unadvertised object" err
 '
 
 test_expect_success 'pushing a specific ref applies remote.$name.push as refmap' '
@@ -1876,26 +1834,35 @@ test_expect_success 'refuse to push a hidden ref, and make sure do not pollute t
 	test_dir_is_empty testrepo/.git/objects/pack
 '
 
-test_expect_success 'push with config push.useBitmaps' '
-	mk_test testrepo heads/main &&
-	git checkout main &&
-	test_unconfig push.useBitmaps &&
-	GIT_TRACE2_EVENT="$PWD/default" \
-	git push --quiet testrepo main:test &&
-	test_subcommand git pack-objects --all-progress-implied --revs --stdout \
-		--thin --delta-base-offset -q <default &&
+test_expect_success 'fetch warns or fails when using username:password' '
+	message="URL '\''https://username:<redacted>@localhost/'\'' uses plaintext credentials" &&
+	test_must_fail git -c fetch.credentialsInUrl=allow fetch https://username:password@localhost 2>err &&
+	! grep "$message" err &&
 
-	test_config push.useBitmaps true &&
-	GIT_TRACE2_EVENT="$PWD/true" \
-	git push --quiet testrepo main:test2 &&
-	test_subcommand git pack-objects --all-progress-implied --revs --stdout \
-		--thin --delta-base-offset -q <true &&
+	test_must_fail git -c fetch.credentialsInUrl=warn fetch https://username:password@localhost 2>err &&
+	grep "warning: $message" err >warnings &&
+	test_line_count = 3 warnings &&
 
-	test_config push.useBitmaps false &&
-	GIT_TRACE2_EVENT="$PWD/false" \
-	git push --quiet testrepo main:test3 &&
-	test_subcommand git pack-objects --all-progress-implied --revs --stdout \
-		--thin --delta-base-offset -q --no-use-bitmap-index <false
+	test_must_fail git -c fetch.credentialsInUrl=die fetch https://username:password@localhost 2>err &&
+	grep "fatal: $message" err >warnings &&
+	test_line_count = 1 warnings &&
+
+	test_must_fail git -c fetch.credentialsInUrl=die fetch https://username:@localhost 2>err &&
+	grep "fatal: $message" err >warnings &&
+	test_line_count = 1 warnings
+'
+
+
+test_expect_success 'push warns or fails when using username:password' '
+	message="URL '\''https://username:<redacted>@localhost/'\'' uses plaintext credentials" &&
+	test_must_fail git -c fetch.credentialsInUrl=allow push https://username:password@localhost 2>err &&
+	! grep "$message" err &&
+
+	test_must_fail git -c fetch.credentialsInUrl=warn push https://username:password@localhost 2>err &&
+	grep "warning: $message" err >warnings &&
+	test_must_fail git -c fetch.credentialsInUrl=die push https://username:password@localhost 2>err &&
+	grep "fatal: $message" err >warnings &&
+	test_line_count = 1 warnings
 '
 
 test_done

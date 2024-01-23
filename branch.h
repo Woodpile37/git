@@ -103,10 +103,11 @@ void create_branches_recursively(struct repository *r, const char *name,
 				 int dry_run);
 
 /*
- * If the branch at 'refname' is currently checked out in a worktree,
- * then return the path to that worktree.
+ * Returns true if the branch at 'refname' is checked out at any
+ * non-bare worktree. The path of the worktree is stored in the
+ * given 'path', if provided.
  */
-const char *branch_checked_out(const char *refname);
+int branch_checked_out(const char *refname, char **path);
 
 /*
  * Check if 'name' can be a valid name for a branch; die otherwise.
@@ -154,5 +155,13 @@ int read_branch_desc(struct strbuf *, const char *branch_name);
  * it is.
  */
 void die_if_checked_out(const char *branch, int ignore_current_worktree);
+
+/*
+ * Update all per-worktree HEADs pointing at the old ref to point the new ref.
+ * This will be used when renaming a branch. Returns 0 if successful, non-zero
+ * otherwise.
+ */
+int replace_each_worktree_head_symref(const char *oldref, const char *newref,
+				      const char *logmsg);
 
 #endif

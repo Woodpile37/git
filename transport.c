@@ -1,8 +1,5 @@
-#include "git-compat-util.h"
-#include "advice.h"
+#include "cache.h"
 #include "config.h"
-#include "environment.h"
-#include "hex.h"
 #include "transport.h"
 #include "hook.h"
 #include "pkt-line.h"
@@ -10,8 +7,9 @@
 #include "remote.h"
 #include "connect.h"
 #include "send-pack.h"
+#include "walker.h"
 #include "bundle.h"
-#include "gettext.h"
+#include "dir.h"
 #include "refs.h"
 #include "refspec.h"
 #include "branch.h"
@@ -20,12 +18,10 @@
 #include "string-list.h"
 #include "oid-array.h"
 #include "sigchain.h"
-#include "trace2.h"
 #include "transport-internal.h"
 #include "protocol.h"
-#include "object-name.h"
+#include "object-store.h"
 #include "color.h"
-#include "bundle-uri.h"
 
 static int transport_use_color = -1;
 static char transport_colors[][COLOR_MAXLEN] = {
@@ -146,7 +142,7 @@ static void get_refs_from_bundle_inner(struct transport *transport)
 
 static struct ref *get_refs_from_bundle(struct transport *transport,
 					int for_push,
-					struct transport_ls_refs_options *transport_options UNUSED)
+					struct transport_ls_refs_options *transport_options)
 {
 	struct bundle_transport_data *data = transport->data;
 	struct ref *result = NULL;
@@ -170,8 +166,7 @@ static struct ref *get_refs_from_bundle(struct transport *transport,
 }
 
 static int fetch_refs_from_bundle(struct transport *transport,
-				  int nr_heads UNUSED,
-				  struct ref **to_fetch UNUSED)
+			       int nr_heads, struct ref **to_fetch)
 {
 	struct bundle_transport_data *data = transport->data;
 	struct strvec extra_index_pack_args = STRVEC_INIT;
@@ -183,7 +178,7 @@ static int fetch_refs_from_bundle(struct transport *transport,
 	if (!data->get_refs_from_bundle_called)
 		get_refs_from_bundle_inner(transport);
 	ret = unbundle(the_repository, &data->header, data->fd,
-		       &extra_index_pack_args, 0);
+		       &extra_index_pack_args);
 	transport->hash_algo = data->header.hash_algo;
 	return ret;
 }
@@ -202,7 +197,7 @@ struct git_transport_data {
 	struct git_transport_options options;
 	struct child_process *conn;
 	int fd[2];
-	unsigned finished_handshake : 1;
+	unsigned got_remote_heads : 1;
 	enum protocol_version version;
 	struct oid_array extra_have;
 	struct oid_array shallow;
@@ -280,12 +275,8 @@ static int connect_setup(struct transport *transport, int for_push)
 	}
 
 	data->conn = git_connect(data->fd, transport->url,
-				 for_push ?
-					"git-receive-pack" :
-					"git-upload-pack",
-				 for_push ?
-					data->options.receivepack :
-					data->options.uploadpack,
+				 for_push ? data->options.receivepack :
+				 data->options.uploadpack,
 				 flags);
 
 	return 0;
@@ -315,7 +306,7 @@ static struct ref *handshake(struct transport *transport, int for_push,
 	struct git_transport_data *data = transport->data;
 	struct ref *refs = NULL;
 	struct packet_reader reader;
-	size_t sid_len;
+	int sid_len;
 	const char *server_sid;
 
 	connect_setup(transport, for_push);
@@ -353,7 +344,7 @@ static struct ref *handshake(struct transport *transport, int for_push,
 	case protocol_unknown_version:
 		BUG("unknown protocol version");
 	}
-	data->finished_handshake = 1;
+	data->got_remote_heads = 1;
 	transport->hash_algo = reader.hash_algo;
 
 	if (reader.line_peeked)
@@ -362,53 +353,95 @@ static struct ref *handshake(struct transport *transport, int for_push,
 	return refs;
 }
 
+static int fetch_object_info(struct transport *transport, struct object_info **object_info_data)
+{
+	size_t i;
+	int size_index = -1;
+	struct git_transport_data *data = transport->data;
+	struct object_info_args args;
+	struct packet_reader reader;
+	struct string_list server_attributes = STRING_LIST_INIT_DUP;
+
+	memset(&args, 0, sizeof(args));
+	args.server_options = transport->server_options;
+	args.object_info_options = transport->smart_options->object_info_options;
+
+	connect_setup(transport, 0);
+	packet_reader_init(&reader, data->fd[0], NULL, 0,
+			PACKET_READ_CHOMP_NEWLINE |
+			PACKET_READ_DIE_ON_ERR_PACKET);
+	data->version = discover_version(&reader);
+
+	transport->hash_algo = reader.hash_algo;
+
+	switch (data->version) {
+	case protocol_v2:
+		if (!server_supports_v2("object-info", 0))
+			return -1;
+		/**
+		 * Send a request with only attributes first. If server can return all
+		 * of the requested attributes, then send request with object ids
+		 */
+		send_object_info_request(data->fd[1], &args);
+		if (packet_reader_read(&reader) != PACKET_READ_NORMAL) {
+			check_stateless_delimiter(transport->stateless_rpc, &reader, "stateless delimiter expected");
+			return -1;
+		}
+		string_list_split(&server_attributes, reader.line, ' ', -1);
+		packet_reader_read(&reader);
+		check_stateless_delimiter(transport->stateless_rpc, &reader, "stateless delimiter expected");
+		if (server_attributes.nr != args.object_info_options->nr)
+			return -1;
+		for (i = 0; i < server_attributes.nr; i++) {
+			if (!strcmp(server_attributes.items[i].string, "size"))
+				size_index = i + 1;
+		}
+		args.oids = transport->smart_options->object_info_oids;
+		send_object_info_request(data->fd[1], &args);
+		break;
+	case protocol_v1:
+	case protocol_v0:
+		die(_("wrong protocol version. expected v2"));
+	case protocol_unknown_version:
+		BUG("unknown protocol version");
+	}
+
+	if (packet_reader_read(&reader) != PACKET_READ_NORMAL)
+		die(_("error reading object info header"));
+	i = 0;
+	while (packet_reader_read(&reader) == PACKET_READ_NORMAL) {
+		struct string_list object_info_values = STRING_LIST_INIT_DUP;
+
+		string_list_split(&object_info_values, reader.line, ' ', -1);
+		if (size_index > 0) {
+			if (!strcmp(object_info_values.items[size_index].string, ""))
+				die("object-info: not our ref %s",
+					object_info_values.items[0].string);
+			*(*object_info_data)[i].sizep = strtoul(object_info_values.items[size_index].string, NULL, 10);
+		}
+		i++;
+	}
+	check_stateless_delimiter(transport->stateless_rpc, &reader, "stateless delimiter expected");
+
+	return 0;
+}
+
 static struct ref *get_refs_via_connect(struct transport *transport, int for_push,
 					struct transport_ls_refs_options *options)
 {
 	return handshake(transport, for_push, options, 1);
 }
 
-static int get_bundle_uri(struct transport *transport)
-{
-	struct git_transport_data *data = transport->data;
-	struct packet_reader reader;
-	int stateless_rpc = transport->stateless_rpc;
-
-	if (!transport->bundles) {
-		CALLOC_ARRAY(transport->bundles, 1);
-		init_bundle_list(transport->bundles);
-	}
-
-	if (!data->finished_handshake) {
-		struct ref *refs = handshake(transport, 0, NULL, 0);
-
-		if (refs)
-			free_refs(refs);
-	}
-
-	/*
-	 * "Support" protocol v0 and v2 without bundle-uri support by
-	 * silently degrading to a NOOP.
-	 */
-	if (!server_supports_v2("bundle-uri"))
-		return 0;
-
-	packet_reader_init(&reader, data->fd[0], NULL, 0,
-			   PACKET_READ_CHOMP_NEWLINE |
-			   PACKET_READ_GENTLE_ON_EOF);
-
-	return get_remote_bundle_uri(data->fd[1], &reader,
-				     transport->bundles, stateless_rpc);
-}
-
 static int fetch_refs_via_pack(struct transport *transport,
 			       int nr_heads, struct ref **to_fetch)
 {
 	int ret = 0;
+	size_t i;
 	struct git_transport_data *data = transport->data;
 	struct ref *refs = NULL;
 	struct fetch_pack_args args;
 	struct ref *refs_tmp = NULL;
+	struct ref *wanted_refs = xcalloc(1, sizeof (struct ref));
 
 	memset(&args, 0, sizeof(args));
 	args.uploadpack = data->options.uploadpack;
@@ -428,15 +461,29 @@ static int fetch_refs_via_pack(struct transport *transport,
 	args.cloning = transport->cloning;
 	args.update_shallow = data->options.update_shallow;
 	args.from_promisor = data->options.from_promisor;
-	list_objects_filter_copy(&args.filter_options,
-				 &data->options.filter_options);
+	args.filter_options = data->options.filter_options;
 	args.refetch = data->options.refetch;
 	args.stateless_rpc = transport->stateless_rpc;
 	args.server_options = transport->server_options;
 	args.negotiation_tips = data->options.negotiation_tips;
 	args.reject_shallow_remote = transport->smart_options->reject_shallow;
+	args.object_info = transport->smart_options->object_info;
 
-	if (!data->finished_handshake) {
+	if (transport->smart_options && transport->smart_options->object_info) {
+		struct ref *ref = wanted_refs;
+
+		if (!fetch_object_info(transport, data->options.object_info_data))
+			goto cleanup;
+		args.object_info_data = data->options.object_info_data;
+		for (i = 0; i < transport->smart_options->object_info_oids->nr; i++) {
+			struct ref *temp_ref = xcalloc(1, sizeof (struct ref));
+			temp_ref->old_oid = *(transport->smart_options->object_info_oids->oid + i);
+			temp_ref->exact_oid = 1;
+			ref->next = temp_ref;
+			ref = ref->next;
+		}
+		transport->remote_refs = wanted_refs->next;
+	} else if (!data->got_remote_heads) {
 		int i;
 		int must_list_refs = 0;
 		for (i = 0; i < nr_heads; i++) {
@@ -453,7 +500,7 @@ static int fetch_refs_via_pack(struct transport *transport,
 	else if (data->version <= protocol_v1)
 		die_if_server_options(transport);
 
-	if (data->options.acked_commits) {
+	if (data->options.acked_commits && !transport->smart_options->object_info) {
 		if (data->version < protocol_v2) {
 			warning(_("--negotiate-only requires protocol v2"));
 			ret = -1;
@@ -476,7 +523,7 @@ static int fetch_refs_via_pack(struct transport *transport,
 			  to_fetch, nr_heads, &data->shallow,
 			  &transport->pack_lockfiles, data->version);
 
-	data->finished_handshake = 0;
+	data->got_remote_heads = 0;
 	data->options.self_contained_and_connected =
 		args.self_contained_and_connected;
 	data->options.connectivity_checked = args.connectivity_checked;
@@ -496,7 +543,7 @@ cleanup:
 
 	free_refs(refs_tmp);
 	free_refs(refs);
-	list_objects_filter_release(&args.filter_options);
+	free_refs(wanted_refs);
 	return ret;
 }
 
@@ -784,8 +831,7 @@ static int print_one_push_status(struct ref *ref, const char *dest, int count,
 static int measure_abbrev(const struct object_id *oid, int sofar)
 {
 	char hex[GIT_MAX_HEXSZ + 1];
-	int w = repo_find_unique_abbrev_r(the_repository, hex, oid,
-					  DEFAULT_ABBREV);
+	int w = find_unique_abbrev_r(hex, oid, DEFAULT_ABBREV);
 
 	return (w < sofar) ? sofar : w;
 }
@@ -862,7 +908,7 @@ static int git_transport_push(struct transport *transport, struct ref *remote_re
 	if (transport_color_config() < 0)
 		return -1;
 
-	if (!data->finished_handshake)
+	if (!data->got_remote_heads)
 		get_refs_via_connect(transport, 1, NULL);
 
 	memset(&args, 0, sizeof(args));
@@ -910,7 +956,7 @@ static int git_transport_push(struct transport *transport, struct ref *remote_re
 	else
 		ret = finish_connect(data->conn);
 	data->conn = NULL;
-	data->finished_handshake = 0;
+	data->got_remote_heads = 0;
 
 	return ret;
 }
@@ -920,7 +966,7 @@ static int connect_git(struct transport *transport, const char *name,
 {
 	struct git_transport_data *data = transport->data;
 	data->conn = git_connect(data->fd, transport->url,
-				 name, executable, 0);
+				 executable, 0);
 	fd[0] = data->fd[0];
 	fd[1] = data->fd[1];
 	return 0;
@@ -930,7 +976,7 @@ static int disconnect_git(struct transport *transport)
 {
 	struct git_transport_data *data = transport->data;
 	if (data->conn) {
-		if (data->finished_handshake && !transport->stateless_rpc)
+		if (data->got_remote_heads && !transport->stateless_rpc)
 			packet_flush(data->fd[1]);
 		close(data->fd[0]);
 		if (data->fd[1] >= 0)
@@ -938,14 +984,12 @@ static int disconnect_git(struct transport *transport)
 		finish_connect(data->conn);
 	}
 
-	list_objects_filter_release(&data->options.filter_options);
 	free(data);
 	return 0;
 }
 
 static struct transport_vtable taken_over_vtable = {
 	.get_refs_list	= get_refs_via_connect,
-	.get_bundle_uri = get_bundle_uri,
 	.fetch_refs	= fetch_refs_via_pack,
 	.push_refs	= git_transport_push,
 	.disconnect	= disconnect_git
@@ -965,7 +1009,7 @@ void transport_take_over(struct transport *transport,
 	data->conn = child;
 	data->fd[0] = data->conn->out;
 	data->fd[1] = data->conn->in;
-	data->finished_handshake = 0;
+	data->got_remote_heads = 0;
 	transport->data = data;
 
 	transport->vtable = &taken_over_vtable;
@@ -987,7 +1031,7 @@ static int external_specification_len(const char *url)
 	return strchr(url, ':') - url;
 }
 
-static const struct string_list *protocol_allow_list(void)
+static const struct string_list *protocol_whitelist(void)
 {
 	static int enabled = -1;
 	static struct string_list allowed = STRING_LIST_INIT_DUP;
@@ -1053,7 +1097,8 @@ static enum protocol_allow_config get_protocol_config(const char *type)
 	if (!strcmp(type, "http") ||
 	    !strcmp(type, "https") ||
 	    !strcmp(type, "git") ||
-	    !strcmp(type, "ssh"))
+	    !strcmp(type, "ssh") ||
+	    !strcmp(type, "file"))
 		return PROTOCOL_ALLOW_ALWAYS;
 
 	/* known scary; err on the side of caution */
@@ -1066,9 +1111,9 @@ static enum protocol_allow_config get_protocol_config(const char *type)
 
 int is_transport_allowed(const char *type, int from_user)
 {
-	const struct string_list *allow_list = protocol_allow_list();
-	if (allow_list)
-		return string_list_has_string(allow_list, type);
+	const struct string_list *whitelist = protocol_whitelist();
+	if (whitelist)
+		return string_list_has_string(whitelist, type);
 
 	switch (get_protocol_config(type)) {
 	case PROTOCOL_ALLOW_ALWAYS:
@@ -1098,7 +1143,6 @@ static struct transport_vtable bundle_vtable = {
 
 static struct transport_vtable builtin_smart_vtable = {
 	.get_refs_list	= get_refs_via_connect,
-	.get_bundle_uri = get_bundle_uri,
 	.fetch_refs	= fetch_refs_via_pack,
 	.push_refs	= git_transport_push,
 	.connect	= connect_git,
@@ -1112,9 +1156,6 @@ struct transport *transport_get(struct remote *remote, const char *url)
 
 	ret->progress = isatty(2);
 	string_list_init_dup(&ret->pack_lockfiles);
-
-	CALLOC_ARRAY(ret->bundles, 1);
-	init_bundle_list(ret->bundles);
 
 	if (!remote)
 		BUG("No remote provided to transport_get()");
@@ -1160,13 +1201,12 @@ struct transport *transport_get(struct remote *remote, const char *url)
 		 * will be checked individually in git_connect.
 		 */
 		struct git_transport_data *data = xcalloc(1, sizeof(*data));
-		list_objects_filter_init(&data->options.filter_options);
 		ret->data = data;
 		ret->vtable = &builtin_smart_vtable;
 		ret->smart_options = &(data->options);
 
 		data->conn = NULL;
-		data->finished_handshake = 0;
+		data->got_remote_heads = 0;
 	} else {
 		/* Unknown protocol in URL. Pass to external handler. */
 		int len = external_specification_len(url);
@@ -1530,34 +1570,6 @@ int transport_fetch_refs(struct transport *transport, struct ref *refs)
 	return rc;
 }
 
-int transport_get_remote_bundle_uri(struct transport *transport)
-{
-	int value = 0;
-	const struct transport_vtable *vtable = transport->vtable;
-
-	/* Check config only once. */
-	if (transport->got_remote_bundle_uri)
-		return 0;
-	transport->got_remote_bundle_uri = 1;
-
-	/*
-	 * Don't request bundle-uri from the server unless configured to
-	 * do so by the transfer.bundleURI=true config option.
-	 */
-	if (git_config_get_bool("transfer.bundleuri", &value) || !value)
-		return 0;
-
-	if (!transport->bundles->baseURI)
-		transport->bundles->baseURI = xstrdup(transport->url);
-
-	if (!vtable->get_bundle_uri)
-		return error(_("bundle-uri operation not supported by protocol"));
-
-	if (vtable->get_bundle_uri(transport) < 0)
-		return error(_("could not retrieve server-advertised bundle-uri list"));
-	return 0;
-}
-
 void transport_unlock_pack(struct transport *transport, unsigned int flags)
 {
 	int in_signal_handler = !!(flags & TRANSPORT_UNLOCK_PACK_IN_SIGNAL_HANDLER);
@@ -1588,8 +1600,6 @@ int transport_disconnect(struct transport *transport)
 		ret = transport->vtable->disconnect(transport);
 	if (transport->got_remote_refs)
 		free_refs((void *)transport->remote_refs);
-	clear_bundle_list(transport->bundles);
-	free(transport->bundles);
 	free(transport);
 	return ret;
 }
