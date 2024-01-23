@@ -843,8 +843,16 @@ int is_per_worktree_ref(const char *refname)
 	       starts_with(refname, "refs/rewritten/");
 }
 
-static int is_pseudoref_syntax(const char *refname)
+int is_pseudoref_syntax(const char *refname)
 {
+	/* TODO: move these pseudorefs to have _HEAD suffix */
+	static const char *const irregular_pseudorefs[] = {
+		"BISECT_EXPECTED_REV",
+		"NOTES_MERGE_PARTIAL",
+		"NOTES_MERGE_REF",
+		"AUTO_MERGE"
+	};
+	size_t i;
 	const char *c;
 
 	for (c = refname; *c; c++) {
@@ -853,10 +861,17 @@ static int is_pseudoref_syntax(const char *refname)
 	}
 
 	/*
-	 * HEAD is not a pseudoref, but it certainly uses the
-	 * pseudoref syntax.
+	 * Most pseudorefs end with _HEAD. HEAD itself is not a
+	 * pseudoref, but it certainly uses the pseudoref syntax.
 	 */
-	return 1;
+	if (ends_with(refname, "HEAD"))
+		return 1;
+
+	for (i = 0; i < ARRAY_SIZE(irregular_pseudorefs); i++)
+		if (!strcmp(refname, irregular_pseudorefs[i]))
+			return 1;
+
+	return 0;
 }
 
 static int is_current_worktree_ref(const char *ref) {
@@ -1721,6 +1736,13 @@ int refs_for_each_rawref(struct ref_store *refs, each_ref_fn fn, void *cb_data)
 int for_each_rawref(each_ref_fn fn, void *cb_data)
 {
 	return refs_for_each_rawref(get_main_ref_store(the_repository), fn, cb_data);
+}
+
+int refs_for_each_all_refs(struct ref_store *refs, each_ref_fn fn,
+			   void *cb_data)
+{
+	return do_for_each_ref(refs, "", NULL, fn, 0,
+			       DO_FOR_EACH_INCLUDE_ALL_REFS, cb_data);
 }
 
 static int qsort_strcmp(const void *va, const void *vb)
