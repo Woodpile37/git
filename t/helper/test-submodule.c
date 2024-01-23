@@ -9,14 +9,14 @@
 #include "submodule.h"
 
 #define TEST_TOOL_CHECK_NAME_USAGE \
-	"test-tool submodule check-name <name>"
+	"test-tool submodule check-name"
 static const char *submodule_check_name_usage[] = {
 	TEST_TOOL_CHECK_NAME_USAGE,
 	NULL
 };
 
 #define TEST_TOOL_CHECK_URL_USAGE \
-	"test-tool submodule check-url <url>"
+	"test-tool submodule check-url"
 static const char *submodule_check_url_usage[] = {
 	TEST_TOOL_CHECK_URL_USAGE,
 	NULL
@@ -38,6 +38,7 @@ static const char *submodule_resolve_relative_url_usage[] = {
 
 static const char *submodule_usage[] = {
 	TEST_TOOL_CHECK_NAME_USAGE,
+	TEST_TOOL_CHECK_URL_USAGE,
 	TEST_TOOL_IS_ACTIVE_USAGE,
 	TEST_TOOL_RESOLVE_RELATIVE_URL_USAGE,
 	NULL
@@ -46,25 +47,17 @@ static const char *submodule_usage[] = {
 typedef int (*check_fn_t)(const char *);
 
 /*
- * Exit non-zero if any of the submodule names given on the command line is
- * invalid. If no names are given, filter stdin to print only valid names
- * (which is primarily intended for testing).
+ * Apply 'check_fn' to each line of stdin, printing values that pass the check
+ * to stdout.
  */
-static int check_submodule(int argc, const char **argv, check_fn_t check_fn)
+static int check_submodule(check_fn_t check_fn)
 {
-	if (argc > 1) {
-		while (*++argv) {
-			if (check_fn(*argv) < 0)
-				return 1;
-		}
-	} else {
-		struct strbuf buf = STRBUF_INIT;
-		while (strbuf_getline(&buf, stdin) != EOF) {
-			if (!check_fn(buf.buf))
-				printf("%s\n", buf.buf);
-		}
-		strbuf_release(&buf);
+	struct strbuf buf = STRBUF_INIT;
+	while (strbuf_getline(&buf, stdin) != EOF) {
+		if (!check_fn(buf.buf))
+			printf("%s\n", buf.buf);
 	}
+	strbuf_release(&buf);
 	return 0;
 }
 
@@ -78,7 +71,7 @@ static int cmd__submodule_check_name(int argc, const char **argv)
 	if (argc)
 		usage_with_options(submodule_check_name_usage, options);
 
-	return check_submodule(argc, argv, check_submodule_name);
+	return check_submodule(check_submodule_name);
 }
 
 static int cmd__submodule_check_url(int argc, const char **argv)
@@ -91,7 +84,7 @@ static int cmd__submodule_check_url(int argc, const char **argv)
 	if (argc)
 		usage_with_options(submodule_check_url_usage, options);
 
-	return check_submodule(argc, argv, check_submodule_url);
+	return check_submodule(check_submodule_url);
 }
 
 static int cmd__submodule_is_active(int argc, const char **argv)

@@ -13,12 +13,6 @@ https://developers.google.com/open-source/licenses/bsd
 #include "reftable-blocksource.h"
 #include "reftable-error.h"
 
-#if defined(NO_MMAP)
-static int use_mmap = 0;
-#else
-static int use_mmap = 1;
-#endif
-
 static void strbuf_return_block(void *b, struct reftable_block *dest)
 {
 	if (dest->len)
@@ -82,7 +76,6 @@ struct reftable_block_source malloc_block_source(void)
 }
 
 struct file_block_source {
-	int fd;
 	uint64_t size;
 	unsigned char *data;
 };
@@ -99,18 +92,7 @@ static void file_return_block(void *b, struct reftable_block *dest)
 static void file_close(void *v)
 {
 	struct file_block_source *b = v;
-
-	if (b->fd >= 0) {
-		close(b->fd);
-		b->fd = -1;
-	}
-
-	if (use_mmap)
-		munmap(b->data, b->size);
-	else
-		reftable_free(b->data);
-	b->data = NULL;
-
+	munmap(b->data, b->size);
 	reftable_free(b);
 }
 
@@ -134,39 +116,26 @@ static struct reftable_block_source_vtable file_vtable = {
 int reftable_block_source_from_file(struct reftable_block_source *bs,
 				    const char *name)
 {
-	struct stat st = { 0 };
-	int err = 0;
+	struct file_block_source *p;
+	struct stat st;
 	int fd;
-	struct file_block_source *p = NULL;
 
 	fd = open(name, O_RDONLY);
 	if (fd < 0) {
-		if (errno == ENOENT) {
+		if (errno == ENOENT)
 			return REFTABLE_NOT_EXIST_ERROR;
-		}
 		return -1;
 	}
 
-	err = fstat(fd, &st);
-	if (err < 0) {
+	if (fstat(fd, &st) < 0) {
 		close(fd);
 		return REFTABLE_IO_ERROR;
 	}
 
-	p = reftable_calloc(sizeof(struct file_block_source));
+	p = reftable_calloc(sizeof(*p));
 	p->size = st.st_size;
-	if (use_mmap) {
-		p->data = xmmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-		p->fd = fd;
-	} else {
-		p->data = xmalloc(st.st_size);
-		if (read_in_full(fd, p->data, st.st_size) != st.st_size) {
-			close(fd);
-			return -1;
-		}
-		close(fd);
-		p->fd = -1;
-	}
+	p->data = xmmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
 
 	assert(!bs->ops);
 	bs->ops = &file_vtable;

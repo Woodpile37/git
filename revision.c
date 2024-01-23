@@ -837,12 +837,12 @@ static int rev_same_tree_as_empty(struct rev_info *revs, struct commit *commit,
 				  int nth_parent)
 {
 	struct tree *t1 = repo_get_commit_tree(the_repository, commit);
-	int bloom_ret = 1;
+	int bloom_ret = -1;
 
 	if (!t1)
 		return 0;
 
-	if (nth_parent == 1 && revs->bloom_keys_nr) {
+	if (!nth_parent && revs->bloom_keys_nr) {
 		bloom_ret = check_maybe_different_in_bloom_filter(revs, commit);
 		if (!bloom_ret)
 			return 1;
@@ -995,7 +995,7 @@ static void try_to_simplify_commit(struct rev_info *revs, struct commit *commit)
 		 * (if one exists) is relative to the empty tree, using Bloom
 		 * filters is allowed here.
 		 */
-		if (rev_same_tree_as_empty(revs, commit, 1))
+		if (rev_same_tree_as_empty(revs, commit, 0))
 			commit->object.flags |= TREESAME;
 		return;
 	}
@@ -1979,11 +1979,31 @@ static void add_pending_commit_list(struct rev_info *revs,
 	}
 }
 
+static const char *lookup_other_head(struct object_id *oid)
+{
+	int i;
+	static const char *const other_head[] = {
+		"MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"
+	};
+
+	for (i = 0; i < ARRAY_SIZE(other_head); i++)
+		if (!read_ref_full(other_head[i],
+				RESOLVE_REF_READING | RESOLVE_REF_NO_RECURSE,
+				oid, NULL)) {
+			if (is_null_oid(oid))
+				die("%s is a symbolic ref???", other_head[i]);
+			return other_head[i];
+		}
+
+	die("--merge without MERGE_HEAD, REBASE_HEAD, CHERRY_PICK_HEAD or REVERT_HEAD?");
+}
+
 static void prepare_show_merge(struct rev_info *revs)
 {
 	struct commit_list *bases;
 	struct commit *head, *other;
 	struct object_id oid;
+	const char *other_name;
 	const char **prune = NULL;
 	int i, prune_num = 1; /* counting terminating NULL */
 	struct index_state *istate = revs->repo->index;
@@ -1991,11 +2011,10 @@ static void prepare_show_merge(struct rev_info *revs)
 	if (repo_get_oid(the_repository, "HEAD", &oid))
 		die("--merge without HEAD?");
 	head = lookup_commit_or_die(&oid, "HEAD");
-	if (repo_get_oid(the_repository, "MERGE_HEAD", &oid))
-		die("--merge without MERGE_HEAD?");
-	other = lookup_commit_or_die(&oid, "MERGE_HEAD");
+	other_name = lookup_other_head(&oid);
+	other = lookup_commit_or_die(&oid, other_name);
 	add_pending_object(revs, &head->object, "HEAD");
-	add_pending_object(revs, &other->object, "MERGE_HEAD");
+	add_pending_object(revs, &other->object, other_name);
 	bases = repo_get_merge_bases(the_repository, head, other);
 	add_rev_cmdline_list(revs, bases, REV_CMD_MERGE_BASE, UNINTERESTING | BOTTOM);
 	add_pending_commit_list(revs, bases, UNINTERESTING | BOTTOM);

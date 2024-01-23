@@ -2,38 +2,62 @@
  * The backend-independent part of the reference module.
  */
 
-#include "cache.h"
+#include "git-compat-util.h"
+#include "advice.h"
 #include "config.h"
+#include "environment.h"
 #include "hashmap.h"
+#include "gettext.h"
+#include "hex.h"
 #include "lockfile.h"
 #include "iterator.h"
 #include "refs.h"
 #include "refs/refs-internal.h"
 #include "run-command.h"
 #include "hook.h"
-#include "object-store.h"
+#include "object-name.h"
+#include "object-store-ll.h"
 #include "object.h"
+#include "path.h"
 #include "tag.h"
 #include "submodule.h"
 #include "worktree.h"
 #include "strvec.h"
 #include "repository.h"
+#include "setup.h"
 #include "sigchain.h"
 #include "date.h"
 #include "commit.h"
+#include "wildmatch.h"
 
 /*
  * List of all available backends
  */
-static struct ref_storage_be *refs_backends = &refs_be_files;
+static const struct ref_storage_be *refs_backends[] = {
+	[REF_STORAGE_FORMAT_FILES] = &refs_be_files,
+};
 
-static struct ref_storage_be *find_ref_storage_backend(const char *name)
+static const struct ref_storage_be *find_ref_storage_backend(unsigned int ref_storage_format)
 {
-	struct ref_storage_be *be;
-	for (be = refs_backends; be; be = be->next)
-		if (!strcmp(be->name, name))
-			return be;
+	if (ref_storage_format < ARRAY_SIZE(refs_backends))
+		return refs_backends[ref_storage_format];
 	return NULL;
+}
+
+unsigned int ref_storage_format_by_name(const char *name)
+{
+	for (unsigned int i = 0; i < ARRAY_SIZE(refs_backends); i++)
+		if (refs_backends[i] && !strcmp(refs_backends[i]->name, name))
+			return i;
+	return REF_STORAGE_FORMAT_UNKNOWN;
+}
+
+const char *ref_storage_format_to_name(unsigned int ref_storage_format)
+{
+	const struct ref_storage_be *be = find_ref_storage_backend(ref_storage_format);
+	if (!be)
+		return "unknown";
+	return be->name;
 }
 
 /*
@@ -55,6 +79,21 @@ static unsigned char refname_disposition[256] = {
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 0, 4, 0,
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 4, 4
+};
+
+/*
+ * List of documented pseudorefs. This needs to be kept in sync with the list
+ * in Documentation/revisions.txt.
+ */
+static const char *const pseudorefs[] = {
+	"FETCH_HEAD",
+	"ORIG_HEAD",
+	"MERGE_HEAD",
+	"REBASE_HEAD",
+	"CHERRY_PICK_HEAD",
+	"REVERT_HEAD",
+	"BISECT_HEAD",
+	"AUTO_MERGE",
 };
 
 struct ref_namespace_info ref_namespace[] = {
@@ -367,8 +406,8 @@ char *resolve_refdup(const char *refname, int resolve_flags,
 				   oid, flags);
 }
 
-/* The argument to filter_refs */
-struct ref_filter {
+/* The argument to for_each_filter_refs */
+struct for_each_ref_filter {
 	const char *pattern;
 	const char *prefix;
 	each_ref_fn *fn;
@@ -401,10 +440,11 @@ int ref_exists(const char *refname)
 	return refs_ref_exists(get_main_ref_store(the_repository), refname);
 }
 
-static int filter_refs(const char *refname, const struct object_id *oid,
-			   int flags, void *data)
+static int for_each_filter_refs(const char *refname,
+				const struct object_id *oid,
+				int flags, void *data)
 {
-	struct ref_filter *filter = (struct ref_filter *)data;
+	struct for_each_ref_filter *filter = data;
 
 	if (wildmatch(filter->pattern, refname, 0))
 		return 0;
@@ -541,13 +581,16 @@ void normalize_glob_ref(struct string_list_item *item, const char *prefix,
 
 	if (prefix)
 		strbuf_addstr(&normalized_pattern, prefix);
-	else if (!starts_with(pattern, "refs/") &&
-		   strcmp(pattern, "HEAD"))
-		strbuf_addstr(&normalized_pattern, "refs/");
-	/*
-	 * NEEDSWORK: Special case other symrefs such as REBASE_HEAD,
-	 * MERGE_HEAD, etc.
-	 */
+	else if (!starts_with(pattern, "refs/") && strcmp(pattern, "HEAD")) {
+		int i;
+
+		for (i = 0; i < ARRAY_SIZE(pseudorefs); i++)
+			if (!strcmp(pattern, pseudorefs[i]))
+				break;
+
+		if (i == ARRAY_SIZE(pseudorefs))
+			strbuf_addstr(&normalized_pattern, "refs/");
+	}
 
 	strbuf_addstr(&normalized_pattern, pattern);
 	strbuf_strip_suffix(&normalized_pattern, "/");
@@ -561,7 +604,7 @@ int for_each_glob_ref_in(each_ref_fn fn, const char *pattern,
 	const char *prefix, void *cb_data)
 {
 	struct strbuf real_pattern = STRBUF_INIT;
-	struct ref_filter filter;
+	struct for_each_ref_filter filter;
 	int ret;
 
 	if (!prefix && !starts_with(pattern, "refs/"))
@@ -581,7 +624,7 @@ int for_each_glob_ref_in(each_ref_fn fn, const char *pattern,
 	filter.prefix = prefix;
 	filter.fn = fn;
 	filter.cb_data = cb_data;
-	ret = for_each_ref(filter_refs, &filter);
+	ret = for_each_ref(for_each_filter_refs, &filter);
 
 	strbuf_release(&real_pattern);
 	return ret;
@@ -818,8 +861,16 @@ int is_per_worktree_ref(const char *refname)
 	       starts_with(refname, "refs/rewritten/");
 }
 
-static int is_pseudoref_syntax(const char *refname)
+int is_pseudoref_syntax(const char *refname)
 {
+	/* TODO: move these pseudorefs to have _HEAD suffix */
+	static const char *const irregular_pseudorefs[] = {
+		"BISECT_EXPECTED_REV",
+		"NOTES_MERGE_PARTIAL",
+		"NOTES_MERGE_REF",
+		"AUTO_MERGE"
+	};
+	size_t i;
 	const char *c;
 
 	for (c = refname; *c; c++) {
@@ -828,10 +879,17 @@ static int is_pseudoref_syntax(const char *refname)
 	}
 
 	/*
-	 * HEAD is not a pseudoref, but it certainly uses the
-	 * pseudoref syntax.
+	 * Most pseudorefs end with _HEAD. HEAD itself is not a
+	 * pseudoref, but it certainly uses the pseudoref syntax.
 	 */
-	return 1;
+	if (ends_with(refname, "HEAD"))
+		return 1;
+
+	for (i = 0; i < ARRAY_SIZE(irregular_pseudorefs); i++)
+		if (!strcmp(refname, irregular_pseudorefs[i]))
+			return 1;
+
+	return 0;
 }
 
 static int is_current_worktree_ref(const char *ref) {
@@ -1310,65 +1368,68 @@ int update_ref(const char *msg, const char *refname,
 			       old_oid, flags, onerr);
 }
 
+/*
+ * Check that the string refname matches a rule of the form
+ * "{prefix}%.*s{suffix}". So "foo/bar/baz" would match the rule
+ * "foo/%.*s/baz", and return the string "bar".
+ */
+static const char *match_parse_rule(const char *refname, const char *rule,
+				    size_t *len)
+{
+	/*
+	 * Check that rule matches refname up to the first percent in the rule.
+	 * We can bail immediately if not, but otherwise we leave "rule" at the
+	 * %-placeholder, and "refname" at the start of the potential matched
+	 * name.
+	 */
+	while (*rule != '%') {
+		if (!*rule)
+			BUG("rev-parse rule did not have percent");
+		if (*refname++ != *rule++)
+			return NULL;
+	}
+
+	/*
+	 * Check that our "%" is the expected placeholder. This assumes there
+	 * are no other percents (placeholder or quoted) in the string, but
+	 * that is sufficient for our rev-parse rules.
+	 */
+	if (!skip_prefix(rule, "%.*s", &rule))
+		return NULL;
+
+	/*
+	 * And now check that our suffix (if any) matches.
+	 */
+	if (!strip_suffix(refname, rule, len))
+		return NULL;
+
+	return refname; /* len set by strip_suffix() */
+}
+
 char *refs_shorten_unambiguous_ref(struct ref_store *refs,
 				   const char *refname, int strict)
 {
 	int i;
-	static char **scanf_fmts;
-	static int nr_rules;
-	char *short_name;
 	struct strbuf resolved_buf = STRBUF_INIT;
 
-	if (!nr_rules) {
-		/*
-		 * Pre-generate scanf formats from ref_rev_parse_rules[].
-		 * Generate a format suitable for scanf from a
-		 * ref_rev_parse_rules rule by interpolating "%s" at the
-		 * location of the "%.*s".
-		 */
-		size_t total_len = 0;
-		size_t offset = 0;
-
-		/* the rule list is NULL terminated, count them first */
-		for (nr_rules = 0; ref_rev_parse_rules[nr_rules]; nr_rules++)
-			/* -2 for strlen("%.*s") - strlen("%s"); +1 for NUL */
-			total_len += strlen(ref_rev_parse_rules[nr_rules]) - 2 + 1;
-
-		scanf_fmts = xmalloc(st_add(st_mult(sizeof(char *), nr_rules), total_len));
-
-		offset = 0;
-		for (i = 0; i < nr_rules; i++) {
-			assert(offset < total_len);
-			scanf_fmts[i] = (char *)&scanf_fmts[nr_rules] + offset;
-			offset += xsnprintf(scanf_fmts[i], total_len - offset,
-					    ref_rev_parse_rules[i], 2, "%s") + 1;
-		}
-	}
-
-	/* bail out if there are no rules */
-	if (!nr_rules)
-		return xstrdup(refname);
-
-	/* buffer for scanf result, at most refname must fit */
-	short_name = xstrdup(refname);
-
 	/* skip first rule, it will always match */
-	for (i = nr_rules - 1; i > 0 ; --i) {
+	for (i = NUM_REV_PARSE_RULES - 1; i > 0 ; --i) {
 		int j;
 		int rules_to_fail = i;
-		int short_name_len;
+		const char *short_name;
+		size_t short_name_len;
 
-		if (1 != sscanf(refname, scanf_fmts[i], short_name))
+		short_name = match_parse_rule(refname, ref_rev_parse_rules[i],
+					      &short_name_len);
+		if (!short_name)
 			continue;
-
-		short_name_len = strlen(short_name);
 
 		/*
 		 * in strict mode, all (except the matched one) rules
 		 * must fail to resolve to a valid non-ambiguous ref
 		 */
 		if (strict)
-			rules_to_fail = nr_rules;
+			rules_to_fail = NUM_REV_PARSE_RULES;
 
 		/*
 		 * check if the short name resolves to a valid ref,
@@ -1388,7 +1449,8 @@ char *refs_shorten_unambiguous_ref(struct ref_store *refs,
 			 */
 			strbuf_reset(&resolved_buf);
 			strbuf_addf(&resolved_buf, rule,
-				    short_name_len, short_name);
+				    cast_size_t_to_int(short_name_len),
+				    short_name);
 			if (refs_ref_exists(refs, resolved_buf.buf))
 				break;
 		}
@@ -1399,12 +1461,11 @@ char *refs_shorten_unambiguous_ref(struct ref_store *refs,
 		 */
 		if (j == rules_to_fail) {
 			strbuf_release(&resolved_buf);
-			return short_name;
+			return xmemdupz(short_name, short_name_len);
 		}
 	}
 
 	strbuf_release(&resolved_buf);
-	free(short_name);
 	return xstrdup(refname);
 }
 
@@ -1415,7 +1476,7 @@ char *shorten_unambiguous_ref(const char *refname, int strict)
 }
 
 int parse_hide_refs_config(const char *var, const char *value, const char *section,
-			   struct string_list *hide_refs)
+			   struct strvec *hide_refs)
 {
 	const char *key;
 	if (!strcmp("transfer.hiderefs", var) ||
@@ -1426,22 +1487,23 @@ int parse_hide_refs_config(const char *var, const char *value, const char *secti
 
 		if (!value)
 			return config_error_nonbool(var);
-		ref = xstrdup(value);
+
+		/* drop const to remove trailing '/' characters */
+		ref = (char *)strvec_push(hide_refs, value);
 		len = strlen(ref);
 		while (len && ref[len - 1] == '/')
 			ref[--len] = '\0';
-		string_list_append_nodup(hide_refs, ref);
 	}
 	return 0;
 }
 
 int ref_is_hidden(const char *refname, const char *refname_full,
-		  const struct string_list *hide_refs)
+		  const struct strvec *hide_refs)
 {
 	int i;
 
 	for (i = hide_refs->nr - 1; i >= 0; i--) {
-		const char *match = hide_refs->items[i].string;
+		const char *match = hide_refs->v[i];
 		const char *subject;
 		int neg = 0;
 		const char *p;
@@ -1465,6 +1527,30 @@ int ref_is_hidden(const char *refname, const char *refname_full,
 			return !neg;
 	}
 	return 0;
+}
+
+const char **hidden_refs_to_excludes(const struct strvec *hide_refs)
+{
+	const char **pattern;
+	for (pattern = hide_refs->v; *pattern; pattern++) {
+		/*
+		 * We can't feed any excludes from hidden refs config
+		 * sections, since later rules may override previous
+		 * ones. For example, with rules "refs/foo" and
+		 * "!refs/foo/bar", we should show "refs/foo/bar" (and
+		 * everything underneath it), but the earlier exclusion
+		 * would cause us to skip all of "refs/foo".  We
+		 * likewise don't implement the namespace stripping
+		 * required for '^' rules.
+		 *
+		 * Both are possible to do, but complicated, so avoid
+		 * populating the jump list at all if we see either of
+		 * these patterns.
+		 */
+		if (**pattern == '!' || **pattern == '^')
+			return NULL;
+	}
+	return hide_refs->v;
 }
 
 const char *find_descendant_ref(const char *dirname,
@@ -1512,9 +1598,38 @@ int head_ref(each_ref_fn fn, void *cb_data)
 	return refs_head_ref(get_main_ref_store(the_repository), fn, cb_data);
 }
 
+int refs_for_each_pseudoref(struct ref_store *refs,
+			    each_ref_fn fn, void *cb_data)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(pseudorefs); i++) {
+		struct object_id oid;
+		int flag;
+
+		if (refs_resolve_ref_unsafe(refs, pseudorefs[i],
+					    RESOLVE_REF_READING, &oid, &flag)) {
+			int ret = fn(pseudorefs[i], &oid, flag, cb_data);
+
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+
+int for_each_pseudoref(each_ref_fn fn, void *cb_data)
+{
+	return refs_for_each_pseudoref(get_main_ref_store(the_repository),
+				       fn, cb_data);
+}
+
 struct ref_iterator *refs_ref_iterator_begin(
 		struct ref_store *refs,
-		const char *prefix, int trim,
+		const char *prefix,
+		const char **exclude_patterns,
+		int trim,
 		enum do_for_each_ref_flags flags)
 {
 	struct ref_iterator *iter;
@@ -1530,8 +1645,7 @@ struct ref_iterator *refs_ref_iterator_begin(
 		}
 	}
 
-	iter = refs->be->iterator_begin(refs, prefix, flags);
-
+	iter = refs->be->iterator_begin(refs, prefix, exclude_patterns, flags);
 	/*
 	 * `iterator_begin()` already takes care of prefix, but we
 	 * might need to do some trimming:
@@ -1565,7 +1679,7 @@ static int do_for_each_repo_ref(struct repository *r, const char *prefix,
 	if (!refs)
 		return 0;
 
-	iter = refs_ref_iterator_begin(refs, prefix, trim, flags);
+	iter = refs_ref_iterator_begin(refs, prefix, NULL, trim, flags);
 
 	return do_for_each_repo_ref_iterator(r, iter, fn, cb_data);
 }
@@ -1575,7 +1689,7 @@ struct do_for_each_ref_help {
 	void *cb_data;
 };
 
-static int do_for_each_ref_helper(struct repository *r,
+static int do_for_each_ref_helper(struct repository *r UNUSED,
 				  const char *refname,
 				  const struct object_id *oid,
 				  int flags,
@@ -1587,6 +1701,7 @@ static int do_for_each_ref_helper(struct repository *r,
 }
 
 static int do_for_each_ref(struct ref_store *refs, const char *prefix,
+			   const char **exclude_patterns,
 			   each_ref_fn fn, int trim,
 			   enum do_for_each_ref_flags flags, void *cb_data)
 {
@@ -1596,7 +1711,8 @@ static int do_for_each_ref(struct ref_store *refs, const char *prefix,
 	if (!refs)
 		return 0;
 
-	iter = refs_ref_iterator_begin(refs, prefix, trim, flags);
+	iter = refs_ref_iterator_begin(refs, prefix, exclude_patterns, trim,
+				       flags);
 
 	return do_for_each_repo_ref_iterator(the_repository, iter,
 					do_for_each_ref_helper, &hp);
@@ -1604,7 +1720,7 @@ static int do_for_each_ref(struct ref_store *refs, const char *prefix,
 
 int refs_for_each_ref(struct ref_store *refs, each_ref_fn fn, void *cb_data)
 {
-	return do_for_each_ref(refs, "", fn, 0, 0, cb_data);
+	return do_for_each_ref(refs, "", NULL, fn, 0, 0, cb_data);
 }
 
 int for_each_ref(each_ref_fn fn, void *cb_data)
@@ -1615,7 +1731,7 @@ int for_each_ref(each_ref_fn fn, void *cb_data)
 int refs_for_each_ref_in(struct ref_store *refs, const char *prefix,
 			 each_ref_fn fn, void *cb_data)
 {
-	return do_for_each_ref(refs, prefix, fn, strlen(prefix), 0, cb_data);
+	return do_for_each_ref(refs, prefix, NULL, fn, strlen(prefix), 0, cb_data);
 }
 
 int for_each_ref_in(const char *prefix, each_ref_fn fn, void *cb_data)
@@ -1626,13 +1742,14 @@ int for_each_ref_in(const char *prefix, each_ref_fn fn, void *cb_data)
 int for_each_fullref_in(const char *prefix, each_ref_fn fn, void *cb_data)
 {
 	return do_for_each_ref(get_main_ref_store(the_repository),
-			       prefix, fn, 0, 0, cb_data);
+			       prefix, NULL, fn, 0, 0, cb_data);
 }
 
 int refs_for_each_fullref_in(struct ref_store *refs, const char *prefix,
+			     const char **exclude_patterns,
 			     each_ref_fn fn, void *cb_data)
 {
-	return do_for_each_ref(refs, prefix, fn, 0, 0, cb_data);
+	return do_for_each_ref(refs, prefix, exclude_patterns, fn, 0, 0, cb_data);
 }
 
 int for_each_replace_ref(struct repository *r, each_repo_ref_fn fn, void *cb_data)
@@ -1643,26 +1760,34 @@ int for_each_replace_ref(struct repository *r, each_repo_ref_fn fn, void *cb_dat
 				    DO_FOR_EACH_INCLUDE_BROKEN, cb_data);
 }
 
-int for_each_namespaced_ref(each_ref_fn fn, void *cb_data)
+int for_each_namespaced_ref(const char **exclude_patterns,
+			    each_ref_fn fn, void *cb_data)
 {
 	struct strbuf buf = STRBUF_INIT;
 	int ret;
 	strbuf_addf(&buf, "%srefs/", get_git_namespace());
 	ret = do_for_each_ref(get_main_ref_store(the_repository),
-			      buf.buf, fn, 0, 0, cb_data);
+			      buf.buf, exclude_patterns, fn, 0, 0, cb_data);
 	strbuf_release(&buf);
 	return ret;
 }
 
 int refs_for_each_rawref(struct ref_store *refs, each_ref_fn fn, void *cb_data)
 {
-	return do_for_each_ref(refs, "", fn, 0,
+	return do_for_each_ref(refs, "", NULL, fn, 0,
 			       DO_FOR_EACH_INCLUDE_BROKEN, cb_data);
 }
 
 int for_each_rawref(each_ref_fn fn, void *cb_data)
 {
 	return refs_for_each_rawref(get_main_ref_store(the_repository), fn, cb_data);
+}
+
+int refs_for_each_all_refs(struct ref_store *refs, each_ref_fn fn,
+			   void *cb_data)
+{
+	return do_for_each_ref(refs, "", NULL, fn, 0,
+			       DO_FOR_EACH_INCLUDE_ALL_REFS, cb_data);
 }
 
 static int qsort_strcmp(const void *va, const void *vb)
@@ -1723,9 +1848,11 @@ static void find_longest_prefixes(struct string_list *out,
 	strbuf_release(&prefix);
 }
 
-int for_each_fullref_in_prefixes(const char *namespace,
-				 const char **patterns,
-				 each_ref_fn fn, void *cb_data)
+int refs_for_each_fullref_in_prefixes(struct ref_store *ref_store,
+				      const char *namespace,
+				      const char **patterns,
+				      const char **exclude_patterns,
+				      each_ref_fn fn, void *cb_data)
 {
 	struct string_list prefixes = STRING_LIST_INIT_DUP;
 	struct string_list_item *prefix;
@@ -1740,7 +1867,8 @@ int for_each_fullref_in_prefixes(const char *namespace,
 
 	for_each_string_list_item(prefix, &prefixes) {
 		strbuf_addstr(&buf, prefix->string);
-		ret = for_each_fullref_in(buf.buf, fn, cb_data);
+		ret = refs_for_each_fullref_in(ref_store, buf.buf,
+					       exclude_patterns, fn, cb_data);
 		if (ret)
 			break;
 		strbuf_setlen(&buf, namespace_len);
@@ -1761,8 +1889,10 @@ static int refs_read_special_head(struct ref_store *ref_store,
 	int result = -1;
 	strbuf_addf(&full_path, "%s/%s", ref_store->gitdir, refname);
 
-	if (strbuf_read_file(&content, full_path.buf, 0) < 0)
+	if (strbuf_read_file(&content, full_path.buf, 0) < 0) {
+		*failure_errno = errno;
 		goto done;
+	}
 
 	result = parse_loose_ref_contents(content.buf, oid, referent, type,
 					  failure_errno);
@@ -1773,15 +1903,45 @@ done:
 	return result;
 }
 
+static int is_special_ref(const char *refname)
+{
+	/*
+	 * Special references are refs that have different semantics compared
+	 * to "normal" refs. These refs can thus not be stored in the ref
+	 * backend, but must always be accessed via the filesystem. The
+	 * following refs are special:
+	 *
+	 * - FETCH_HEAD may contain multiple object IDs, and each one of them
+	 *   carries additional metadata like where it came from.
+	 *
+	 * - MERGE_HEAD may contain multiple object IDs when merging multiple
+	 *   heads.
+	 *
+	 * Reading, writing or deleting references must consistently go either
+	 * through the filesystem (special refs) or through the reference
+	 * backend (normal ones).
+	 */
+	static const char * const special_refs[] = {
+		"FETCH_HEAD",
+		"MERGE_HEAD",
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(special_refs); i++)
+		if (!strcmp(refname, special_refs[i]))
+			return 1;
+
+	return 0;
+}
+
 int refs_read_raw_ref(struct ref_store *ref_store, const char *refname,
 		      struct object_id *oid, struct strbuf *referent,
 		      unsigned int *type, int *failure_errno)
 {
 	assert(failure_errno);
-	if (!strcmp(refname, "FETCH_HEAD") || !strcmp(refname, "MERGE_HEAD")) {
+	if (is_special_ref(refname))
 		return refs_read_special_head(ref_store, refname, oid, referent,
 					      type, failure_errno);
-	}
 
 	return ref_store->be->read_raw_ref(ref_store, refname, oid, referent,
 					   type, failure_errno);
@@ -1817,7 +1977,7 @@ const char *refs_resolve_ref_unsafe(struct ref_store *refs,
 			return NULL;
 
 		/*
-		 * dwim_ref() uses REF_ISBROKEN to distinguish between
+		 * repo_dwim_ref() uses REF_ISBROKEN to distinguish between
 		 * missing refs and refs that were present but invalid,
 		 * to complain about the latter to stderr.
 		 *
@@ -1883,11 +2043,9 @@ const char *refs_resolve_ref_unsafe(struct ref_store *refs,
 }
 
 /* backend functions */
-int refs_init_db(struct strbuf *err)
+int refs_init_db(struct ref_store *refs, int flags, struct strbuf *err)
 {
-	struct ref_store *refs = get_main_ref_store(the_repository);
-
-	return refs->be->init_db(refs, err);
+	return refs->be->init_db(refs, flags, err);
 }
 
 const char *resolve_ref_unsafe(const char *refname, int resolve_flags,
@@ -1898,21 +2056,19 @@ const char *resolve_ref_unsafe(const char *refname, int resolve_flags,
 }
 
 int resolve_gitlink_ref(const char *submodule, const char *refname,
-			struct object_id *oid, const char **target_out)
+			struct object_id *oid)
 {
 	struct ref_store *refs;
 	int flags;
-	const char *target;
 
 	refs = get_submodule_ref_store(submodule);
 
 	if (!refs)
 		return -1;
-	target = refs_resolve_ref_unsafe(refs, refname, 0, oid, &flags);
-	if (!target || is_null_oid(oid))
+
+	if (!refs_resolve_ref_unsafe(refs, refname, 0, oid, &flags) ||
+	    is_null_oid(oid))
 		return -1;
-	if (target_out)
-		*target_out = target;
 	return 0;
 }
 
@@ -1978,17 +2134,6 @@ static struct ref_store *lookup_ref_store_map(struct hashmap *map,
 	return entry ? entry->refs : NULL;
 }
 
-static int add_ref_format_flags(enum ref_format_flags flags, int caps) {
-	if (flags & REF_FORMAT_FILES)
-		caps |= REF_STORE_FORMAT_FILES;
-	if (flags & REF_FORMAT_PACKED)
-		caps |= REF_STORE_FORMAT_PACKED;
-	if (flags & REF_FORMAT_PACKED_V2)
-		caps |= REF_STORE_FORMAT_PACKED_V2;
-
-	return caps;
-}
-
 /*
  * Create, record, and return a ref_store instance for the specified
  * gitdir.
@@ -1997,20 +2142,12 @@ static struct ref_store *ref_store_init(struct repository *repo,
 					const char *gitdir,
 					unsigned int flags)
 {
-	const char *be_name = "files";
-	struct ref_storage_be *be;
+	const struct ref_storage_be *be;
 	struct ref_store *refs;
 
-	flags = add_ref_format_flags(repo->ref_format, flags);
-
-	if (!(flags & REF_STORE_FORMAT_FILES) &&
-	    packed_refs_enabled(flags))
-		be_name = "packed";
-
-	be = find_ref_storage_backend(be_name);
-
+	be = find_ref_storage_backend(repo->ref_storage_format);
 	if (!be)
-		BUG("reference backend %s is unknown", be_name);
+		BUG("reference backend is unknown");
 
 	refs = be->init(repo, gitdir, flags);
 	return refs;
@@ -2024,8 +2161,7 @@ struct ref_store *get_main_ref_store(struct repository *r)
 	if (!r->gitdir)
 		BUG("attempting to get main_ref_store outside of repository");
 
-	r->refs_private = ref_store_init(r, r->gitdir,
-					 REF_STORE_ALL_CAPS);
+	r->refs_private = ref_store_init(r, r->gitdir, REF_STORE_ALL_CAPS);
 	r->refs_private = maybe_debug_wrap_ref_store(r->gitdir, r->refs_private);
 	return r->refs_private;
 }
@@ -2142,9 +2278,9 @@ void base_ref_store_init(struct ref_store *refs, struct repository *repo,
 }
 
 /* backend functions */
-int refs_pack_refs(struct ref_store *refs, unsigned int flags)
+int refs_pack_refs(struct ref_store *refs, struct pack_refs_opts *opts)
 {
-	return refs->be->pack_refs(refs, flags);
+	return refs->be->pack_refs(refs, opts);
 }
 
 int peel_iterated_oid(const struct object_id *base, struct object_id *peeled)
@@ -2417,7 +2553,7 @@ int refs_verify_refname_available(struct ref_store *refs,
 	strbuf_addstr(&dirname, refname + dirname.len);
 	strbuf_addch(&dirname, '/');
 
-	iter = refs_ref_iterator_begin(refs, dirname.buf, 0,
+	iter = refs_ref_iterator_begin(refs, dirname.buf, NULL, 0,
 				       DO_FOR_EACH_INCLUDE_BROKEN);
 	while ((ok = ref_iterator_advance(iter)) == ITER_OK) {
 		if (skip &&
@@ -2576,13 +2712,55 @@ void ref_transaction_for_each_queued_update(struct ref_transaction *transaction,
 int refs_delete_refs(struct ref_store *refs, const char *logmsg,
 		     struct string_list *refnames, unsigned int flags)
 {
+	struct ref_transaction *transaction;
+	struct strbuf err = STRBUF_INIT;
+	struct string_list_item *item;
+	int ret = 0, failures = 0;
 	char *msg;
-	int retval;
+
+	if (!refnames->nr)
+		return 0;
 
 	msg = normalize_reflog_message(logmsg);
-	retval = refs->be->delete_refs(refs, msg, refnames, flags);
+
+	/*
+	 * Since we don't check the references' old_oids, the
+	 * individual updates can't fail, so we can pack all of the
+	 * updates into a single transaction.
+	 */
+	transaction = ref_store_transaction_begin(refs, &err);
+	if (!transaction) {
+		ret = error("%s", err.buf);
+		goto out;
+	}
+
+	for_each_string_list_item(item, refnames) {
+		ret = ref_transaction_delete(transaction, item->string,
+					     NULL, flags, msg, &err);
+		if (ret) {
+			warning(_("could not delete reference %s: %s"),
+				item->string, err.buf);
+			strbuf_reset(&err);
+			failures = 1;
+		}
+	}
+
+	ret = ref_transaction_commit(transaction, &err);
+	if (ret) {
+		if (refnames->nr == 1)
+			error(_("could not delete reference %s: %s"),
+			      refnames->items[0].string, err.buf);
+		else
+			error(_("could not delete references: %s"), err.buf);
+	}
+
+out:
+	if (!ret && failures)
+		ret = -1;
+	ref_transaction_free(transaction);
+	strbuf_release(&err);
 	free(msg);
-	return retval;
+	return ret;
 }
 
 int delete_refs(const char *msg, struct string_list *refnames,

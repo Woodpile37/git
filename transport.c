@@ -1507,6 +1507,7 @@ int transport_push(struct repository *r,
 	if (porcelain && !push_ret)
 		puts("Done");
 	else if (!quiet && !ret && !transport_refs_pushed(remote_refs))
+		/* stable plumbing output; do not modify or localize */
 		fprintf(stderr, "Everything up-to-date\n");
 
 done:

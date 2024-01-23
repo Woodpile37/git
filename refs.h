@@ -407,6 +407,12 @@ int refs_for_each_rawref(struct ref_store *refs, each_ref_fn fn, void *cb_data);
 int for_each_rawref(each_ref_fn fn, void *cb_data);
 
 /*
+ * Iterates over all ref types, regular, pseudorefs and HEAD.
+ */
+int refs_for_each_all_refs(struct ref_store *refs, each_ref_fn fn,
+			   void *cb_data);
+
+/*
  * Normalizes partial refs to their fully qualified form.
  * Will prepend <prefix> to the <pattern> if it doesn't start with 'refs/'.
  * <prefix> will default to 'refs/' if NULL.
@@ -858,6 +864,12 @@ const char **hidden_refs_to_excludes(const struct strvec *hide_refs);
 
 /* Is this a per-worktree ref living in the refs/ namespace? */
 int is_per_worktree_ref(const char *refname);
+
+/*
+ * Check whether a refname matches the pseudoref syntax. This is a surface
+ * level check and can present false positives.
+ */
+int is_pseudoref_syntax(const char *refname);
 
 /* Describes how a refname relates to worktrees */
 enum ref_worktree_type {

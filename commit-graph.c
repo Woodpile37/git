@@ -312,10 +312,10 @@ static int graph_read_bloom_data(const unsigned char *chunk_start,
 		return -1;
 	}
 
-	g->chunk_bloom_data_size = chunk_size;
 	hash_version = get_be32(chunk_start);
 
 	g->chunk_bloom_data = chunk_start;
+	g->chunk_bloom_data_size = chunk_size;
 	g->bloom_filter_settings = xmalloc(sizeof(struct bloom_filter_settings));
 	g->bloom_filter_settings->hash_version = hash_version;
 	g->bloom_filter_settings->num_hashes = get_be32(chunk_start + 4);
@@ -422,8 +422,8 @@ struct commit_graph *parse_commit_graph(struct repo_settings *s,
 
 	if (s->commit_graph_changed_paths_version) {
 		int res = pair_chunk_expect(cf, GRAPH_CHUNKID_BLOOMINDEXES,
-				      &graph->chunk_bloom_indexes,
-				      sizeof(uint32_t), graph->num_commits);
+					    &graph->chunk_bloom_indexes,
+					    sizeof(uint32_t), graph->num_commits);
 		if (res && res != CHUNK_NOT_FOUND)
 			warning(_("commit-graph changed-path index chunk is too small"));
 		read_chunk(cf, GRAPH_CHUNKID_BLOOMDATA,
@@ -519,7 +519,8 @@ static void validate_mixed_bloom_settings(struct commit_graph *g)
 		}
 
 		if (g->bloom_filter_settings->bits_per_entry != settings->bits_per_entry ||
-		    g->bloom_filter_settings->num_hashes != settings->num_hashes) {
+		    g->bloom_filter_settings->num_hashes != settings->num_hashes ||
+		    g->bloom_filter_settings->hash_version != settings->hash_version) {
 			g->chunk_bloom_indexes = NULL;
 			g->chunk_bloom_data = NULL;
 			FREE_AND_NULL(g->bloom_filter_settings);
@@ -2102,7 +2103,7 @@ static int write_commit_graph_file(struct write_commit_graph_context *ctx)
 			st_mult(get_num_chunks(cf), ctx->commits.nr));
 	}
 
-	write_chunkfile(cf, 0, ctx);
+	write_chunkfile(cf, ctx);
 
 	stop_progress(&ctx->progress);
 	strbuf_release(&progress_title);
@@ -2633,19 +2634,16 @@ cleanup:
 	oid_array_clear(&ctx->oids);
 	clear_topo_level_slab(&topo_levels);
 
-	if (ctx->commit_graph_filenames_after) {
-		for (i = 0; i < ctx->num_commit_graphs_after; i++) {
-			free(ctx->commit_graph_filenames_after[i]);
-			free(ctx->commit_graph_hash_after[i]);
-		}
+	for (i = 0; i < ctx->num_commit_graphs_before; i++)
+		free(ctx->commit_graph_filenames_before[i]);
+	free(ctx->commit_graph_filenames_before);
 
-		for (i = 0; i < ctx->num_commit_graphs_before; i++)
-			free(ctx->commit_graph_filenames_before[i]);
-
-		free(ctx->commit_graph_filenames_after);
-		free(ctx->commit_graph_filenames_before);
-		free(ctx->commit_graph_hash_after);
+	for (i = 0; i < ctx->num_commit_graphs_after; i++) {
+		free(ctx->commit_graph_filenames_after[i]);
+		free(ctx->commit_graph_hash_after[i]);
 	}
+	free(ctx->commit_graph_filenames_after);
+	free(ctx->commit_graph_hash_after);
 
 	free(ctx);
 
